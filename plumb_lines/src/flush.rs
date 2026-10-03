@@ -23,7 +23,7 @@ pub struct Clflushopt {
 }
 
 impl Clflushopt {
-    /// Detect CLFLUSHOPT (CPUID.(EAX=7,ECX=0):EBX[23]) and read the flush line size.
+    /// Detect CLFLUSHOPT (`CPUID.(EAX=7,ECX=0):EBX[23]`) and read the flush line size.
     pub fn try_new() -> Option<Self> {
         crate::cpu::has_clflushopt().then(|| Self { line: crate::cpu::flush_line_bytes() as u16 })
     }

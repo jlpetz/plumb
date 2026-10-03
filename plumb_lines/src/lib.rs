@@ -7,7 +7,7 @@
 //! - [`nt`]: non-temporal (streaming) stores in a **scope that ends with `SFENCE`**.
 //! - [`flush`]: CLFLUSHOPT, including a scope that **flushes everything it wrote** before
 //!   anything can read it again.
-//! - [`direct`]: MOVDIR64B (64-byte direct stores) in a scope that ends with `SFENCE`.
+//! - [`direct`](mod@direct): MOVDIR64B (64-byte direct stores) in a scope that ends with `SFENCE`.
 //!
 //! # Why scopes take closures
 //!

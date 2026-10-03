@@ -1,0 +1,11 @@
+{
+  "_comment": "Expectations for bench/src/tiles.rs (k_amx_* kernels). plumb_tiles' own example kernels (k_tile_*) are covered by tiles.json.",
+  "special": ["ldtilecfg", "tilerelease", "tileloadd", "tileloaddt1", "tilestored", "tilezero"],
+  "expect": [
+    ["^k_amx_read$", {"loop_need": ["tileloadd"], "need": ["ldtilecfg", "tilerelease"]}],
+    ["^k_amx_copy$", {"loop_need": ["tileloadd", "tilestored"], "need": ["ldtilecfg", "tilerelease"]}],
+    ["^k_amx_fill$", {"loop_need": ["tilestored"], "need": ["ldtilecfg", "tilerelease"]}],
+    ["^k_amx_strided_read$", {"loop_need": ["tileloadd"], "need": ["ldtilecfg", "tilerelease"]}],
+    ["^k_amx_verify_512$", {"loop_need": ["tileloadd", "tilestored"], "need": ["ldtilecfg", "tilerelease"]}]
+  ]
+}

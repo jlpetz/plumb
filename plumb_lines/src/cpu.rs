@@ -21,17 +21,17 @@ fn max_leaf() -> u32 {
     }
 }
 
-/// CPUID.(EAX=7,ECX=0):EBX[23].
+/// `CPUID.(EAX=7,ECX=0):EBX[23]`.
 pub fn has_clflushopt() -> bool {
     max_leaf() >= 7 && cpuid(7, 0).ebx & (1 << 23) != 0
 }
 
-/// CPUID.(EAX=7,ECX=0):ECX[28].
+/// `CPUID.(EAX=7,ECX=0):ECX[28]`.
 pub fn has_movdir64b() -> bool {
     max_leaf() >= 7 && cpuid(7, 0).ecx & (1 << 28) != 0
 }
 
-/// The CLFLUSH line size, CPUID.1:EBX[15:8] x 8 bytes. That is the granularity CLFLUSH and
+/// The CLFLUSH line size, `CPUID.1:EBX[15:8]` x 8 bytes. That is the granularity CLFLUSH and
 /// CLFLUSHOPT operate on (64 on every current x86 CPU). Falls back to 64 if CPUID reports 0.
 pub fn flush_line_bytes() -> usize {
     match (cpuid(1, 0).ebx >> 8) & 0xff {

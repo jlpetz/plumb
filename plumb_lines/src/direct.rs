@@ -18,7 +18,7 @@
 use core::marker::PhantomData;
 use core::slice;
 
-/// Proof that the CPU has MOVDIR64B (CPUID.(EAX=7,ECX=0):ECX[28]).
+/// Proof that the CPU has MOVDIR64B (`CPUID.(EAX=7,ECX=0):ECX[28]`).
 #[derive(Clone, Copy, Debug)]
 pub struct Movdir64b {
     _private: (),
