@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Tile register names as types.
 //!
 //! The register number is encoded in the instruction (there is no "tile in a register" operand
@@ -6,6 +9,10 @@
 //! splice it into the `asm!` template.
 
 mod sealed {
+    #[expect(
+        unnameable_types,
+        reason = "This is a sealed trait, so being unnameable is the entire point"
+    )]
     pub trait Sealed {}
 }
 

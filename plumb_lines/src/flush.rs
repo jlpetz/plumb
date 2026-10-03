@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! CLFLUSHOPT: evict cache lines to DRAM, so the next read of them is a real DRAM round trip.
 //!
 //! CLFLUSHOPT is about 15x faster than CLFLUSH (which is globally serialized), and it's weakly
@@ -9,7 +12,7 @@
 //! borrowed slice when `f` returns. Flushing isn't a memory-safety matter (caches are
 //! coherent), so the scope hands out ordinary `&mut` access.
 //!
-//! CLFLUSHOPT isn't part of any x86-64 psABI level, so it isn't in any fearless_simd token; it's
+//! CLFLUSHOPT isn't part of any x86-64 psABI level, so it isn't in any `fearless_simd` token; it's
 //! a separate capability ([`Clflushopt`]). On stable it is emitted with `asm!`, which needs no
 //! target feature and inlines into any function. With the `nightly` feature the range flush uses
 //! the stdarch intrinsic inside a `clflushopt` target-feature function (same instruction). The
@@ -27,15 +30,27 @@ impl Clflushopt {
     /// Detect CLFLUSHOPT (`CPUID.(EAX=7,ECX=0):EBX[23]`) and read the flush line size (a power of
     /// two in 32..=4096; anything else CPUID reports, e.g. from an odd hypervisor, becomes 64).
     pub fn try_new() -> Option<Self> {
-        crate::cpu::has_clflushopt().then(|| Self { line: crate::cpu::flush_line_bytes() as u16 })
+        if !crate::cpu::has_clflushopt() {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "`flush_line_bytes` returns at most 4096"
+        )]
+        let line = crate::cpu::flush_line_bytes() as u16;
+        Some(Self { line })
     }
 
     /// # Safety
     /// The CPU must support CLFLUSHOPT, and `line_bytes` must be a power of two no larger than
     /// the CPU's flush line size (smaller is allowed: it only flushes some lines twice).
     pub unsafe fn assume_supported(line_bytes: usize) -> Self {
-        assert!(line_bytes.is_power_of_two() && line_bytes <= u16::MAX as usize);
-        Self { line: line_bytes as u16 }
+        let line = u16::try_from(line_bytes).expect("`line_bytes` must fit in a u16");
+        assert!(
+            line.is_power_of_two(),
+            "`line_bytes` must be a power of two"
+        );
+        Self { line }
     }
 
     /// The flush granularity in bytes.
@@ -58,7 +73,7 @@ impl Clflushopt {
     pub fn flush_line<T: ?Sized>(self, x: &T) {
         // A zero-sized referent (`&()`, an empty slice) can have a dangling address such as 0x1
         // or 0x8, and CLFLUSHOPT faults on unmapped memory. For sized types this folds away.
-        if core::mem::size_of_val(x) == 0 {
+        if size_of_val(x) == 0 {
             return;
         }
         // SAFETY: `self` proves CLFLUSHOPT; `x` has at least one byte, so its address is mapped.
@@ -77,7 +92,7 @@ impl Clflushopt {
     #[inline(always)]
     pub fn flush_no_fence<T>(self, buf: &[T]) {
         // SAFETY: the range is the live slice `buf`.
-        unsafe { self.flush_range(buf.as_ptr() as *const u8, core::mem::size_of_val(buf)) }
+        unsafe { self.flush_range(buf.as_ptr() as *const u8, size_of_val(buf)) }
     }
 
     /// CLFLUSHOPT every line overlapping `[ptr, ptr + bytes)`.
@@ -99,9 +114,9 @@ impl Clflushopt {
         // common 64-byte line gets a constant stride (TMR's addressing); others the general loop.
         unsafe {
             if line == 64 {
-                flush_lines_64(first, lines)
+                flush_lines_64(first, lines);
             } else {
-                flush_lines(first, lines, line)
+                flush_lines(first, lines, line);
             }
         }
     }
@@ -127,7 +142,11 @@ pub fn flush_after<T, R>(cf: Clflushopt, buf: &mut [T], f: impl FnOnce(&mut [T])
         }
     }
     let (ptr, len) = (buf.as_mut_ptr(), buf.len());
-    let _flush = Flush { cf, ptr: ptr as *const u8, bytes: core::mem::size_of_val(buf) };
+    let _flush = Flush {
+        cf,
+        ptr: ptr as *const u8,
+        bytes: size_of_val(buf),
+    };
     // SAFETY: `ptr..ptr+len` is `buf`. The closure's slice is derived from `ptr`, so `ptr` stays
     // its parent and the guard's later use of it is valid.
     f(unsafe { core::slice::from_raw_parts_mut(ptr, len) })
@@ -165,7 +184,7 @@ unsafe fn clflushopt8_64(p: *const u8) {
             "clflushopt [{p} + 448]",
             p = in(reg) p,
             options(nostack, preserves_flags),
-        )
+        );
     }
 }
 

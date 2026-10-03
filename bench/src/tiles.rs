@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! AMX kernels (plumb_tiles) for the bench: tile loads and stores as a DRAM access path, next to
 //! the AVX-512 equivalents. Names use the `k_amx_*` prefix (plumb_tiles' own example uses
 //! `k_tile_*`, with its own asm expectations).
@@ -44,7 +47,10 @@ pub fn k_amx_read(amx: Amx, buf: &[u64]) -> u64 {
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_amx_copy(amx: Amx, dst: &mut [u64], src: &[u64]) {
-    assert!(dst.len() == src.len() && src.len().is_multiple_of(TILE_U64), "halves must be equal whole tiles");
+    assert!(
+        dst.len() == src.len() && src.len().is_multiple_of(TILE_U64),
+        "halves must be equal whole tiles"
+    );
     amx.with_tiles(|t| {
         let (s, _) = src.as_chunks::<TILE_U64>();
         let (d, _) = dst.as_chunks_mut::<TILE_U64>();
@@ -84,7 +90,10 @@ pub fn k_amx_fill(amx: Amx, buf: &mut [u64]) {
 #[inline(never)]
 pub fn k_amx_strided_read(amx: Amx, buf: &[u64]) -> u64 {
     const GROUP_U64: usize = ROWS * PAGE / 8;
-    assert!(buf.len().is_multiple_of(GROUP_U64), "buffer must be whole 64 KiB groups");
+    assert!(
+        buf.len().is_multiple_of(GROUP_U64),
+        "buffer must be whole 64 KiB groups"
+    );
     amx.with_tiles(|t| {
         let (groups, _) = buf.as_chunks::<GROUP_U64>();
         for g in groups {
@@ -133,13 +142,18 @@ pub fn amx_verify<S: Simd>(simd: S, amx: Amx, buf: &[u64], pat: u64) -> u64 {
     let p = u64x8::splat(simd, pat);
     let z = u64x8::splat(simd, 0);
     let (mut a0, mut a1, mut a2, mut a3) = (z, z, z, z);
-    assert!(buf.len().is_multiple_of(TILE_U64), "buffer must be whole tiles");
+    assert!(
+        buf.len().is_multiple_of(TILE_U64),
+        "buffer must be whole tiles"
+    );
     amx.with_tiles(|t| {
         let (tiles, _) = buf.as_chunks::<TILE_U64>();
         for b in tiles {
             t.load_u64::<T0>(b, ROW_BYTES);
             // SAFETY: Line is [u64; 8]; the scratch is 16 lines = one tile at stride 64.
-            let words = unsafe { std::slice::from_raw_parts_mut(scratch.as_mut_ptr() as *mut u64, TILE_U64) };
+            let words = unsafe {
+                std::slice::from_raw_parts_mut(scratch.as_mut_ptr() as *mut u64, TILE_U64)
+            };
             t.store_u64::<T0>(words, ROW_BYTES);
             let (quads, _) = scratch.as_chunks::<4>();
             for q in quads {

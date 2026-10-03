@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Detection against raw CPUID/XCR0 read independently of the crate.
 
 use std::arch::asm;
@@ -23,7 +26,7 @@ fn os_tile_state() -> bool {
     let (lo, hi): (u32, u32);
     // SAFETY: OSXSAVE is set, so XGETBV(0) is defined.
     unsafe {
-        asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi, options(nomem, nostack))
+        asm!("xgetbv", in("ecx") 0_u32, out("eax") lo, out("edx") hi, options(nomem, nostack));
     };
     (u64::from(hi) << 32 | u64::from(lo)) >> 17 & 0b11 == 0b11
 }

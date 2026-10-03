@@ -1,0 +1,125 @@
+env:
+  # Keep in sync with `rust-version` in Cargo.toml and the MSRV in the READMEs and CHANGELOG.md.
+  RUST_MIN_VER: "1.89"
+  # The published library crates. The bench is Windows-only and nightly-only.
+  LIB_PKGS: "-p plumb_lines -p plumb_tiles"
+
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+
+jobs:
+  fmt:
+    name: formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: check copyright headers
+        run: bash .github/copyright.sh
+
+  clippy:
+    name: cargo clippy
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: cargo clippy
+        run: cargo clippy ${{ env.LIB_PKGS }} --all-targets --locked -- -D warnings
+
+  clippy-nightly:
+    name: cargo clippy (nightly, bench)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked --features plumb_lines/nightly -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Tests that need hardware the runner lacks (AVX-512, MOVDIR64B, AMX) skip with a message.
+      - name: cargo test
+        run: cargo test ${{ env.LIB_PKGS }} --locked --no-fail-fast
+
+  test-nightly:
+    name: cargo test (nightly)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: cargo test (plumb_lines nightly feature)
+        run: cargo test -p plumb_lines --features nightly --locked --no-fail-fast
+
+      - name: cargo test (bench equivalence tests)
+        run: cargo test -p plumb-bench --release --locked --no-fail-fast
+
+  check-msrv:
+    name: cargo check (msrv)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install msrv toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MIN_VER }}
+
+      - name: cargo check
+        run: cargo check ${{ env.LIB_PKGS }} --all-targets --locked
+
+  doc:
+    name: cargo doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo doc
+        run: cargo doc ${{ env.LIB_PKGS }} --locked --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"

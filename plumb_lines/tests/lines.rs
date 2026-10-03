@@ -1,10 +1,21 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Integration tests on the real CPU. They skip (with a message) what the CPU lacks.
 
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test data: small indices, truncated or wrapped on purpose"
+)]
+
 use fearless_simd::prelude::*;
-use fearless_simd::{Avx2, Avx512, Level, Sse2, Sse4_2, f64x8, i32x16, u32x16, u64x2, u64x4, u64x8, u8x64};
+use fearless_simd::{
+    Avx2, Avx512, Level, Sse2, Sse4_2, f64x8, i32x16, u8x64, u32x16, u64x2, u64x4, u64x8,
+};
 use plumb_lines::{
-    Clflushopt, Line, Movdir64b, NtStore, as_lines, as_lines_mut, as_vectors, as_vectors_mut, direct, flush_after,
-    nontemporal,
+    Clflushopt, Line, Movdir64b, NtStore, as_lines, as_lines_mut, as_vectors, as_vectors_mut,
+    direct, flush_after, nontemporal,
 };
 
 /// A 64-byte-aligned u64 buffer (Vec<Line> gives the alignment).
@@ -36,20 +47,43 @@ fn check_view<S: Simd, V: SimdBase<S, Element = u64>>(simd: S) {
         for len in [0, 1, V::LEN - 1, V::LEN, V::LEN + 1, 5 * V::LEN + 3, 700] {
             let buf = &all[off..off + len];
             let (head, mid, tail) = as_vectors::<S, V>(simd, buf);
-            assert_eq!(head.len() + mid.len() * V::LEN + tail.len(), len, "off {off} len {len}");
-            assert!(head.len() < V::LEN && tail.len() < V::LEN);
-            assert_eq!(mid.as_ptr() as usize % std::mem::align_of::<V>(), 0, "middle unaligned (off {off} len {len})");
+            assert_eq!(
+                head.len() + mid.len() * V::LEN + tail.len(),
+                len,
+                "off {off} len {len}"
+            );
+            assert!(
+                head.len() < V::LEN && tail.len() < V::LEN,
+                "head/tail must be partial vectors"
+            );
+            assert_eq!(
+                mid.as_ptr() as usize % align_of::<V>(),
+                0,
+                "middle unaligned (off {off} len {len})"
+            );
             if !mid.is_empty() {
                 // The middle is as long as possible: head is exactly up to the first aligned address.
-                let first_aligned = (buf.as_ptr() as usize).next_multiple_of(std::mem::align_of::<V>());
-                assert_eq!(head.len(), (first_aligned - buf.as_ptr() as usize) / 8);
+                let first_aligned = (buf.as_ptr() as usize).next_multiple_of(align_of::<V>());
+                assert_eq!(
+                    head.len(),
+                    (first_aligned - buf.as_ptr() as usize) / 8,
+                    "head must end at the first aligned address"
+                );
             }
             for (k, v) in mid.iter().enumerate() {
                 for j in 0..V::LEN {
-                    assert_eq!(v[j], buf[head.len() + k * V::LEN + j]);
+                    assert_eq!(
+                        v[j],
+                        buf[head.len() + k * V::LEN + j],
+                        "vector {k} lane {j}"
+                    );
                 }
             }
-            assert_eq!(tail, &buf[head.len() + mid.len() * V::LEN..]);
+            assert_eq!(
+                tail,
+                &buf[head.len() + mid.len() * V::LEN..],
+                "tail must be the rest"
+            );
         }
     }
     // Writes through the mutable view land in the buffer.
@@ -59,7 +93,10 @@ fn check_view<S: Simd, V: SimdBase<S, Element = u64>>(simd: S) {
     for v in mid.iter_mut() {
         *v = V::splat(simd, 7);
     }
-    assert!(buf[h..h + 8].iter().all(|&w| w == 7));
+    assert!(
+        buf[h..h + 8].iter().all(|&w| w == 7),
+        "writes through the view must land"
+    );
 }
 
 #[test]
@@ -77,8 +114,10 @@ fn view_splits_every_offset() {
 
 #[test]
 fn view_other_element_types() {
-    let Some(t5) = level().as_avx512() else { return skip("Avx512") };
-    let mut bytes = vec![0u8; 4096 + 100];
+    let Some(t5) = level().as_avx512() else {
+        return skip("Avx512");
+    };
+    let mut bytes = vec![0_u8; 4096 + 100];
     for (i, b) in bytes.iter_mut().enumerate() {
         *b = i as u8;
     }
@@ -127,12 +166,16 @@ fn check_nt<S: Simd, V: NtStore<S> + SimdInt<S, Element = u64>>(simd: S) {
         let mut lines = aligned(n_vectors * V::LEN + 8);
         let buf = words(&mut lines);
         let (h, mid, _) = as_vectors_mut::<S, V>(simd, buf);
-        assert!(h.is_empty());
+        assert!(h.is_empty(), "an aligned buffer has no head");
         let mid = &mut mid[..n_vectors];
         nt_positional(simd, mid);
         for (k, v) in mid.iter().enumerate() {
             for j in 0..V::LEN {
-                assert_eq!(v[j], (k * V::LEN + j) as u64 ^ BASE, "n {n_vectors} vec {k} lane {j}");
+                assert_eq!(
+                    v[j],
+                    (k * V::LEN + j) as u64 ^ BASE,
+                    "n {n_vectors} vec {k} lane {j}"
+                );
             }
         }
     }
@@ -140,9 +183,9 @@ fn check_nt<S: Simd, V: NtStore<S> + SimdInt<S, Element = u64>>(simd: S) {
     let mut lines = aligned(8 * V::LEN);
     let (_, mid, _) = as_vectors_mut::<S, V>(simd, words(&mut lines));
     nontemporal(simd, &mut mid[..8], |w| {
-        assert_eq!(w.len(), 8);
+        assert_eq!(w.len(), 8, "writer length");
         let (a, b) = w.split_at(4);
-        assert_eq!((a.len(), b.len()), (4, 4));
+        assert_eq!((a.len(), b.len()), (4, 4), "split lengths");
         a.fill_with(|i| V::splat(simd, i as u64));
         for (i, slot) in b.into_slots().enumerate() {
             slot.store(V::splat(simd, 104 + i as u64));
@@ -189,22 +232,43 @@ fn nt_every_level_and_width() {
 
 #[test]
 fn nt_other_element_types() {
-    let Some(t5) = level().as_avx512() else { return skip("Avx512") };
+    let Some(t5) = level().as_avx512() else {
+        return skip("Avx512");
+    };
     let mut lines = aligned(64);
     let buf = words(&mut lines);
     // SAFETY: u64 -> u32 view of the same aligned memory.
-    let buf32 = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u32, buf.len() * 2) };
+    let buf32 =
+        unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u32, buf.len() * 2) };
     let (_, mid, _) = as_vectors_mut::<Avx512, u32x16<Avx512>>(t5, buf32);
-    nontemporal(t5, mid, |w| w.fill_with(|i| u32x16::splat(t5, i as u32 + 1)));
-    assert!(mid.iter().enumerate().all(|(i, v)| (0..16).all(|j| v[j] == i as u32 + 1)));
+    nontemporal(t5, mid, |w| {
+        w.fill_with(|i| u32x16::splat(t5, i as u32 + 1));
+    });
+    assert!(
+        mid.iter()
+            .enumerate()
+            .all(|(i, v)| (0..16).all(|j| v[j] == i as u32 + 1))
+    );
 
     let mut f = vec![f64x8::splat(t5, 0.0); 9];
-    nontemporal(t5, &mut f, |w| w.fill_with(|i| f64x8::splat(t5, i as f64 * 0.5)));
-    assert!(f.iter().enumerate().all(|(i, v)| (0..8).all(|j| v[j] == i as f64 * 0.5)));
+    nontemporal(t5, &mut f, |w| {
+        w.fill_with(|i| f64x8::splat(t5, i as f64 * 0.5));
+    });
+    assert!(
+        f.iter()
+            .enumerate()
+            .all(|(i, v)| (0..8).all(|j| v[j] == i as f64 * 0.5))
+    );
 
     let mut s = vec![i32x16::splat(t5, 0); 5];
-    nontemporal(t5, &mut s, |w| w.fill_with(|i| i32x16::splat(t5, -(i as i32) - 1)));
-    assert!(s.iter().enumerate().all(|(i, v)| (0..16).all(|j| v[j] == -(i as i32) - 1)));
+    nontemporal(t5, &mut s, |w| {
+        w.fill_with(|i| i32x16::splat(t5, -(i as i32) - 1));
+    });
+    assert!(
+        s.iter()
+            .enumerate()
+            .all(|(i, v)| (0..16).all(|j| v[j] == -(i as i32) - 1))
+    );
 }
 
 #[test]
@@ -253,7 +317,7 @@ fn flush_after_keeps_contents_and_returns() {
     assert!(cf.line_bytes().is_power_of_two() && (32..=4096).contains(&cf.line_bytes()));
     let mut lines = aligned(4096);
     let buf = words(&mut lines);
-    for off in [0usize, 1, 3, 7] {
+    for off in [0_usize, 1, 3, 7] {
         let sub = &mut buf[off..off + 1000];
         let r = flush_after(cf, sub, |b| {
             for (i, w) in b.iter_mut().enumerate() {
@@ -262,7 +326,11 @@ fn flush_after_keeps_contents_and_returns() {
             b.len()
         });
         assert_eq!(r, 1000);
-        assert!(sub.iter().enumerate().all(|(i, &w)| w == i as u64 ^ 0xA55A_A55A_A55A_A55A));
+        assert!(
+            sub.iter()
+                .enumerate()
+                .all(|(i, &w)| w == i as u64 ^ 0xA55A_A55A_A55A_A55A)
+        );
     }
     flush_after(cf, &mut buf[..0], |_| ());
     cf.flush(&buf[5..9]);
@@ -277,7 +345,7 @@ fn flush_line_on_zero_sized_is_a_no_op() {
     cf.flush_line(&());
     cf.flush_line(&[] as &[u64]);
     cf.flush_line(Vec::<u64>::new().as_slice());
-    let v = [1u64; 8];
+    let v = [1_u64; 8];
     cf.flush_line(&v[8..]);
     cf.flush(&v[8..]);
     cf.flush::<u64>(&[]);
@@ -288,7 +356,7 @@ fn flush_line_on_zero_sized_is_a_no_op() {
 #[test]
 fn flush_after_unwind_ends_scope_and_keeps_writes() {
     let cf = Clflushopt::try_new().expect("CLFLUSHOPT");
-    let mut v = vec![0u64; 512];
+    let mut v = vec![0_u64; 512];
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         flush_after(cf, &mut v, |b| {
             b[10] = 99;
@@ -330,12 +398,14 @@ fn lines_split_every_offset() {
 
 #[test]
 fn direct_copy_fill_and_generate() {
-    let Some(md) = Movdir64b::try_new() else { return skip("MOVDIR64B") };
+    let Some(md) = Movdir64b::try_new() else {
+        return skip("MOVDIR64B");
+    };
     let mut dst = vec![Line::default(); 100];
     let pattern = Line([1, 2, 3, 4, 5, 6, 7, 8]);
     direct(md, &mut dst, |w| {
         assert_eq!(w.len(), 100);
-        w.fill(&pattern)
+        w.fill(&pattern);
     });
     assert!(dst.iter().all(|l| *l == pattern));
 
@@ -344,7 +414,11 @@ fn direct_copy_fill_and_generate() {
     assert_eq!(dst, src);
 
     direct(md, &mut dst, |w| w.fill_with(|i| Line([i as u64 * 3; 8])));
-    assert!(dst.iter().enumerate().all(|(i, l)| *l == Line([i as u64 * 3; 8])));
+    assert!(
+        dst.iter()
+            .enumerate()
+            .all(|(i, l)| *l == Line([i as u64 * 3; 8]))
+    );
 
     direct(md, &mut dst, |w| {
         let (a, b) = w.split_at(57);
@@ -354,21 +428,28 @@ fn direct_copy_fill_and_generate() {
         }
     });
     assert!(dst[..57].iter().all(|l| *l == Line::default()));
-    assert!(dst[57..].iter().enumerate().all(|(i, l)| *l == Line([1000 + i as u64; 8])));
+    assert!(
+        dst[57..]
+            .iter()
+            .enumerate()
+            .all(|(i, l)| *l == Line([1000 + i as u64; 8]))
+    );
 }
 
 #[test]
 fn direct_length_mismatch_and_split_panic() {
-    let Some(md) = Movdir64b::try_new() else { return skip("MOVDIR64B") };
+    let Some(md) = Movdir64b::try_new() else {
+        return skip("MOVDIR64B");
+    };
     let mut dst = vec![Line::default(); 4];
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        direct(md, &mut dst, |w| w.copy_from(&[Line::default(); 3]))
+        direct(md, &mut dst, |w| w.copy_from(&[Line::default(); 3]));
     }));
     assert!(r.is_err());
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         direct(md, &mut dst, |w| {
             let _ = w.split_at(5);
-        })
+        });
     }));
     assert!(r.is_err());
 }
@@ -377,7 +458,9 @@ fn direct_length_mismatch_and_split_panic() {
 /// line written before the panic is kept.
 #[test]
 fn direct_unwind_ends_scope_and_keeps_earlier_stores() {
-    let Some(md) = Movdir64b::try_new() else { return skip("MOVDIR64B") };
+    let Some(md) = Movdir64b::try_new() else {
+        return skip("MOVDIR64B");
+    };
     let mut dst = vec![Line::default(); 4];
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         direct(md, &mut dst, |w| {

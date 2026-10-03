@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Reference kernels in TMR-APP's current style: one `macro_rules!` expansion per width, inside
 //! a `#[target_feature]` fn, using `std::simd` types and `std::arch` intrinsics. Each loop body
 //! is copied from the TMR macro named in its doc comment so the comparison is like-for-like.
@@ -156,15 +159,42 @@ macro_rules! tmr_width {
     };
 }
 
-tmr_width!(u64x2, [0, 1], "sse4.2,sse4.1,ssse3,sse3,sse2,popcnt",
-    k_fill_tmr_128, k_filluni_tmr_128, k_verify4_tmr_128, k_posw_tmr_128, k_posv_tmr_128,
-    k_lcgw_tmr_128, k_pfv_tmr_128);
-tmr_width!(u64x4, [0, 1, 2, 3], "avx2,avx,fma,bmi1,bmi2",
-    k_fill_tmr_256, k_filluni_tmr_256, k_verify4_tmr_256, k_posw_tmr_256, k_posv_tmr_256,
-    k_lcgw_tmr_256, k_pfv_tmr_256);
-tmr_width!(u64x8, [0, 1, 2, 3, 4, 5, 6, 7], "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2",
-    k_fill_tmr_512, k_filluni_tmr_512, k_verify4_tmr_512, k_posw_tmr_512, k_posv_tmr_512,
-    k_lcgw_tmr_512, k_pfv_tmr_512);
+tmr_width!(
+    u64x2,
+    [0, 1],
+    "sse4.2,sse4.1,ssse3,sse3,sse2,popcnt",
+    k_fill_tmr_128,
+    k_filluni_tmr_128,
+    k_verify4_tmr_128,
+    k_posw_tmr_128,
+    k_posv_tmr_128,
+    k_lcgw_tmr_128,
+    k_pfv_tmr_128
+);
+tmr_width!(
+    u64x4,
+    [0, 1, 2, 3],
+    "avx2,avx,fma,bmi1,bmi2",
+    k_fill_tmr_256,
+    k_filluni_tmr_256,
+    k_verify4_tmr_256,
+    k_posw_tmr_256,
+    k_posv_tmr_256,
+    k_lcgw_tmr_256,
+    k_pfv_tmr_256
+);
+tmr_width!(
+    u64x8,
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2",
+    k_fill_tmr_512,
+    k_filluni_tmr_512,
+    k_verify4_tmr_512,
+    k_posw_tmr_512,
+    k_posv_tmr_512,
+    k_lcgw_tmr_512,
+    k_pfv_tmr_512
+);
 
 /// `simple_write_nt_positional_simd!` verbatim: 4x manual unroll, stream intrinsic, sfence.
 macro_rules! tmr_nt {
@@ -189,15 +219,27 @@ macro_rules! tmr_nt {
                 let idx3 = idx2 + step1;
                 let v3: $V = idx3 ^ base_vec;
                 $stream(p.add(i) as *mut $arch, std::mem::transmute::<$V, $arch>(v0));
-                $stream(p.add(i + w) as *mut $arch, std::mem::transmute::<$V, $arch>(v1));
-                $stream(p.add(i + w * 2) as *mut $arch, std::mem::transmute::<$V, $arch>(v2));
-                $stream(p.add(i + w * 3) as *mut $arch, std::mem::transmute::<$V, $arch>(v3));
+                $stream(
+                    p.add(i + w) as *mut $arch,
+                    std::mem::transmute::<$V, $arch>(v1),
+                );
+                $stream(
+                    p.add(i + w * 2) as *mut $arch,
+                    std::mem::transmute::<$V, $arch>(v2),
+                );
+                $stream(
+                    p.add(i + w * 3) as *mut $arch,
+                    std::mem::transmute::<$V, $arch>(v3),
+                );
                 idx_vec += step4;
                 i += w * 4;
             }
             while i < n {
                 let val: $V = idx_vec ^ base_vec;
-                $stream(p.add(i) as *mut $arch, std::mem::transmute::<$V, $arch>(val));
+                $stream(
+                    p.add(i) as *mut $arch,
+                    std::mem::transmute::<$V, $arch>(val),
+                );
                 idx_vec += step1;
                 i += w;
             }
@@ -206,9 +248,30 @@ macro_rules! tmr_nt {
     };
 }
 
-tmr_nt!(k_ntw_tmr_128, u64x2, [0, 1], __m128i, _mm_stream_si128, "sse4.2,sse4.1,ssse3,sse3,sse2,popcnt");
-tmr_nt!(k_ntw_tmr_256, u64x4, [0, 1, 2, 3], __m256i, _mm256_stream_si256, "avx2,avx,fma,bmi1,bmi2");
-tmr_nt!(k_ntw_tmr_512, u64x8, [0, 1, 2, 3, 4, 5, 6, 7], __m512i, _mm512_stream_si512, "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2");
+tmr_nt!(
+    k_ntw_tmr_128,
+    u64x2,
+    [0, 1],
+    __m128i,
+    _mm_stream_si128,
+    "sse4.2,sse4.1,ssse3,sse3,sse2,popcnt"
+);
+tmr_nt!(
+    k_ntw_tmr_256,
+    u64x4,
+    [0, 1, 2, 3],
+    __m256i,
+    _mm256_stream_si256,
+    "avx2,avx,fma,bmi1,bmi2"
+);
+tmr_nt!(
+    k_ntw_tmr_512,
+    u64x8,
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    __m512i,
+    _mm512_stream_si512,
+    "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2"
+);
 
 /// `flush_range_to_dram` verbatim (the CLFLUSHOPT intrinsic in a `clflushopt` fn, then MFENCE).
 #[unsafe(no_mangle)]
@@ -246,7 +309,11 @@ macro_rules! tmr_wflush {
 }
 
 tmr_wflush!(k_wflush_tmr_256, u64x4, "avx2,avx,fma,bmi1,bmi2,clflushopt");
-tmr_wflush!(k_wflush_tmr_512, u64x8, "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2,clflushopt");
+tmr_wflush!(
+    k_wflush_tmr_512,
+    u64x8,
+    "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2,clflushopt"
+);
 
 /// DRAM -> DRAM line copy: 512-bit load + NT store, then sfence (shuffle-test's NT-512 path).
 #[unsafe(no_mangle)]
@@ -255,7 +322,10 @@ tmr_wflush!(k_wflush_tmr_512, u64x8, "avx512f,avx512bw,avx512cd,avx512dq,avx512v
 pub unsafe fn k_copynt_tmr_512(dst: *mut u64, src: *const u64, n: usize) {
     for i in (0..n).step_by(8) {
         let v = *(src.add(i) as *const u64x8);
-        _mm512_stream_si512(dst.add(i) as *mut __m512i, std::mem::transmute::<u64x8, __m512i>(v));
+        _mm512_stream_si512(
+            dst.add(i) as *mut __m512i,
+            std::mem::transmute::<u64x8, __m512i>(v),
+        );
     }
     _mm_sfence();
 }
@@ -286,8 +356,12 @@ pub unsafe fn k_verify4_tmrhelper_512(p: *const u64, n: usize) -> u64 {
     let base = p as *const u64x8;
     let end = n / 8;
     let pat = u64x8::splat(PATTERN);
-    let (mut a0, mut a1, mut a2, mut a3) =
-        (u64x8::splat(0), u64x8::splat(0), u64x8::splat(0), u64x8::splat(0));
+    let (mut a0, mut a1, mut a2, mut a3) = (
+        u64x8::splat(0),
+        u64x8::splat(0),
+        u64x8::splat(0),
+        u64x8::splat(0),
+    );
     let mut i = 0;
     while i + 4 <= end {
         a0 = or_xor_step_std(a0, *base.add(i), pat);

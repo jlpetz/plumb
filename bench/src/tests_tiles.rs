@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Correctness of the AMX bench kernels (tiles.rs) on the real CPU. They skip, with a message,
 //! when the CPU or OS has no AMX tile state.
 
@@ -41,11 +44,17 @@ fn amx_fill_read_and_verify() {
     let b = &mut all[..n];
     assert_eq!(tiles::k_amx_read(amx, b), 0);
     assert_eq!(tiles::k_amx_strided_read(amx, b), 0);
-    let Some(t5) = Level::new().as_avx512() else { return eprintln!("skip: verify needs Avx512") };
+    let Some(t5) = Level::new().as_avx512() else {
+        return eprintln!("skip: verify needs Avx512");
+    };
     assert_eq!(tiles::k_amx_verify_512(t5, amx, b), 0, "false positive");
     for (i, bit) in [(0, 0), (127, 63), (n / 2, 31), (n - 1, 7), (n - 128, 17)] {
         b[i] ^= 1 << bit;
-        assert_eq!(tiles::k_amx_verify_512(t5, amx, b), 1, "missed word {i} bit {bit}");
+        assert_eq!(
+            tiles::k_amx_verify_512(t5, amx, b),
+            1,
+            "missed word {i} bit {bit}"
+        );
         b[i] ^= 1 << bit;
     }
     // SAFETY: aligned, whole 64 KiB groups. The fn's feature list (TMR's 512 set) is a subset of

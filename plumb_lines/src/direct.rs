@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! MOVDIR64B: 64-byte direct stores, in a scope that ends with `SFENCE`.
 //!
 //! MOVDIR64B copies one 64-byte line from memory to a 64-byte-aligned destination as a single
@@ -133,16 +136,35 @@ impl<'a> DirectWriter<'a> {
     /// Split into writers for lines `[0, mid)` and `[mid, len)`. Panics if `mid > len`.
     #[inline(always)]
     pub fn split_at(self, mid: usize) -> (Self, Self) {
-        assert!(mid <= self.len, "DirectWriter::split_at: {mid} out of range for {} lines", self.len);
+        assert!(
+            mid <= self.len,
+            "DirectWriter::split_at: {mid} out of range for {} lines",
+            self.len
+        );
         // SAFETY: mid <= len, so both halves are inside the destination and disjoint.
         let right = unsafe { self.ptr.add(mid) };
-        (Self { ptr: self.ptr, len: mid, _scope: PhantomData }, Self { ptr: right, len: self.len - mid, _scope: PhantomData })
+        (
+            Self {
+                ptr: self.ptr,
+                len: mid,
+                _scope: PhantomData,
+            },
+            Self {
+                ptr: right,
+                len: self.len - mid,
+                _scope: PhantomData,
+            },
+        )
     }
 
     /// MOVDIR64B `src[i]` into line `i` for every line. Panics if the lengths differ.
     #[inline(always)]
     pub fn copy_from(self, src: &[Line]) {
-        assert_eq!(src.len(), self.len, "DirectWriter::copy_from: length mismatch");
+        assert_eq!(
+            src.len(),
+            self.len,
+            "DirectWriter::copy_from: length mismatch"
+        );
         for (i, s) in src.iter().enumerate() {
             // SAFETY: i < len, aligned (from a `&mut [Line]`), written once; the scope fences.
             unsafe { movdir64b(self.ptr.add(i), s) }
@@ -173,7 +195,36 @@ impl<'a> DirectWriter<'a> {
     #[inline(always)]
     pub fn into_slots(self) -> DirectSlots<'a> {
         // SAFETY: `ptr..ptr+len` is this writer's part of the destination.
-        DirectSlots { cur: self.ptr, end: unsafe { self.ptr.add(self.len) }, _w: PhantomData }
+        DirectSlots {
+            cur: self.ptr,
+            end: unsafe { self.ptr.add(self.len) },
+            _w: PhantomData,
+        }
+    }
+}
+
+// Manual `Debug` impls: the length only. Nothing may read the destination before the SFENCE.
+impl core::fmt::Debug for DirectWriter<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DirectWriter")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::fmt::Debug for DirectSlots<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // SAFETY: same allocation, cur <= end.
+        let left = unsafe { self.end.offset_from(self.cur) };
+        f.debug_struct("DirectSlots")
+            .field("left", &left)
+            .finish_non_exhaustive()
+    }
+}
+
+impl core::fmt::Debug for DirectSlot<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DirectSlot").finish_non_exhaustive()
     }
 }
 
@@ -191,7 +242,10 @@ impl<'w> Iterator for DirectSlots<'w> {
         if self.cur == self.end {
             return None;
         }
-        let slot = DirectSlot { ptr: self.cur, _w: PhantomData };
+        let slot = DirectSlot {
+            ptr: self.cur,
+            _w: PhantomData,
+        };
         // SAFETY: cur < end, same allocation.
         self.cur = unsafe { self.cur.add(1) };
         Some(slot)
@@ -226,7 +280,11 @@ pub fn direct<R>(md: Movdir64b, dst: &mut [Line], f: impl FnOnce(DirectWriter<'_
     }
     let _ = md;
     let _fence = Fence;
-    f(DirectWriter { ptr: dst.as_mut_ptr(), len: dst.len(), _scope: PhantomData })
+    f(DirectWriter {
+        ptr: dst.as_mut_ptr(),
+        len: dst.len(),
+        _scope: PhantomData,
+    })
 }
 
 /// One MOVDIR64B.

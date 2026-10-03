@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Capability tokens: zero-sized proofs that the CPU and OS support an instruction set.
 //!
 //! A token can only come from runtime detection or an `unsafe` promise, so holding one is the

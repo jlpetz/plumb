@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Tile loads and stores: strides, offsets, overlap, every register, and the bounds checks.
 
 use std::ops::Range;
@@ -38,7 +41,7 @@ fn zero_then_store_gives_zeros() {
     let Some(amx) = amx_or_skip("zero_then_store_gives_zeros") else {
         return;
     };
-    let ones = vec![0xFFu8; TILE_BYTES];
+    let ones = vec![0xFF_u8; TILE_BYTES];
     let mut out = vec![SENTINEL; TILE_BYTES];
     amx.with_tiles(|t| {
         t.load::<T5>(&ones, ROW_BYTES);
@@ -53,8 +56,8 @@ fn round_trip_at_every_stride_and_offset() {
     let Some(amx) = amx_or_skip("round_trip_at_every_stride_and_offset") else {
         return;
     };
-    for (i, &stride) in [64usize, 72, 200, 4096, 8192].iter().enumerate() {
-        for offset in [0usize, 1, 37] {
+    for (i, &stride) in [64_usize, 72, 200, 4096, 8192].iter().enumerate() {
+        for offset in [0_usize, 1, 37] {
             let src = source(i as u64 * 100 + offset as u64, offset, stride);
             let mut same = vec![SENTINEL; src.len()];
             let mut packed = vec![SENTINEL; TILE_BYTES];
@@ -92,9 +95,9 @@ fn load_t1_reads_the_same_as_load() {
     let Some(amx) = amx_or_skip("load_t1_reads_the_same_as_load") else {
         return;
     };
-    for (i, &stride) in [64usize, 72, 4096].iter().enumerate() {
+    for (i, &stride) in [64_usize, 72, 4096].iter().enumerate() {
         let src = source(7 + i as u64, 5, stride);
-        let (mut a, mut b) = (vec![0u8; TILE_BYTES], vec![1u8; TILE_BYTES]);
+        let (mut a, mut b) = (vec![0_u8; TILE_BYTES], vec![1_u8; TILE_BYTES]);
         amx.with_tiles(|t| {
             t.load::<T0>(&src[5..], stride);
             t.load_t1::<T1>(&src[5..], stride);
@@ -128,10 +131,10 @@ fn small_stride_loads_read_overlapping_rows() {
     let Some(amx) = amx_or_skip("small_stride_loads_read_overlapping_rows") else {
         return;
     };
-    for stride in [0usize, 1, 8, 32, 63] {
+    for stride in [0_usize, 1, 8, 32, 63] {
         let span = tile_span(stride).unwrap();
         let src = Lcg::new(50 + stride as u64).bytes(span + 3);
-        for offset in [0usize, 3] {
+        for offset in [0_usize, 3] {
             let s = &src[offset..][..span];
             let (mut a, mut b) = (vec![SENTINEL; TILE_BYTES], vec![SENTINEL; TILE_BYTES]);
             amx.with_tiles(|t| {
@@ -158,7 +161,7 @@ fn small_stride_loads_read_overlapping_rows() {
         let words: Vec<u64> = (0..span.div_ceil(8) + 1)
             .map(|_| u64::from(lcg.next_u32()) << 32 | u64::from(lcg.next_u32()))
             .collect();
-        for offset in [0usize, 1] {
+        for offset in [0_usize, 1] {
             let w = &words[offset..];
             let (mut a, mut b) = (vec![SENTINEL; TILE_BYTES], vec![SENTINEL; TILE_BYTES]);
             amx.with_tiles(|t| {
@@ -233,7 +236,7 @@ fn all_eight_tiles_are_independent() {
             T5 = 5,
             T6 = 6,
             T7 = 7
-        )
+        );
     });
     for i in 0..8 {
         assert_eq!(
@@ -249,7 +252,7 @@ fn u64_variants_round_trip_with_byte_strides() {
     let Some(amx) = amx_or_skip("u64_variants_round_trip_with_byte_strides") else {
         return;
     };
-    for stride in [64usize, 72, 4096] {
+    for stride in [64_usize, 72, 4096] {
         let words = tile_span(stride).unwrap().div_ceil(8) + 1;
         let mut lcg = Lcg::new(stride as u64);
         let src: Vec<u64> = (0..words)
@@ -309,9 +312,9 @@ fn loads_reject_short_buffers_and_overflowing_strides() {
     let Some(amx) = amx_or_skip("loads_reject_short_buffers_and_overflowing_strides") else {
         return;
     };
-    for stride in [0usize, 1, 64, 72, 4096] {
+    for stride in [0_usize, 1, 64, 72, 4096] {
         let span = tile_span(stride).unwrap();
-        let buf = vec![0u8; span];
+        let buf = vec![0_u8; span];
         // An exact fit is fine.
         amx.with_tiles(|t| {
             t.load::<T0>(&buf, stride);
@@ -322,8 +325,8 @@ fn loads_reject_short_buffers_and_overflowing_strides() {
         assert_out_of_bounds(|| amx.with_tiles(|t| t.load_t1::<T0>(short, stride)));
     }
     assert_out_of_bounds(|| amx.with_tiles(|t| t.load::<T0>(&[], 0)));
-    let big = vec![0u8; 1 << 20];
-    let words = vec![0u64; 1 << 17];
+    let big = vec![0_u8; 1 << 20];
+    let words = vec![0_u64; 1 << 17];
     for stride in HUGE_STRIDES {
         assert_out_of_bounds(|| amx.with_tiles(|t| t.load::<T0>(&big, stride)));
         assert_out_of_bounds(|| amx.with_tiles(|t| t.load_t1::<T0>(&big, stride)));
@@ -344,15 +347,15 @@ fn stores_reject_short_buffers_and_write_nothing() {
     let Some(amx) = amx_or_skip("stores_reject_short_buffers_and_write_nothing") else {
         return;
     };
-    let ones = vec![0xFFu8; TILE_BYTES];
-    for stride in [0usize, 64, 72, 4096] {
+    let ones = vec![0xFF_u8; TILE_BYTES];
+    for stride in [0_usize, 64, 72, 4096] {
         let span = tile_span(stride).unwrap();
         let mut buf = vec![SENTINEL; span];
         assert_out_of_bounds(|| {
             amx.with_tiles(|t| {
                 t.load::<T0>(&ones, ROW_BYTES);
                 t.store::<T0>(&mut buf[..span - 1], stride);
-            })
+            });
         });
         assert!(
             buf.iter().all(|&b| b == SENTINEL),
@@ -369,7 +372,7 @@ fn stores_reject_short_buffers_and_write_nothing() {
         );
     }
     let mut big = vec![SENTINEL; 1 << 20];
-    let mut words = vec![0u64; 1 << 17];
+    let mut words = vec![0_u64; 1 << 17];
     for stride in HUGE_STRIDES {
         assert_out_of_bounds(|| amx.with_tiles(|t| t.store::<T0>(&mut big, stride)));
         assert_out_of_bounds(|| amx.with_tiles(|t| t.store_u64::<T0>(&mut words, stride)));

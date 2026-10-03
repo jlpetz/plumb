@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Memory-tester-shaped tile kernels for `bench/asm_check.py`, which checks (via
 //! `bench/expect/tiles.json`) that each kernel's tile instruction sits inside its loop with no
 //! call there, and that the session's STTILECFG/LDTILECFG/TILERELEASE wrap it.
@@ -15,7 +18,7 @@
 //! anything else rather than skip a tail: a memory tester that quietly leaves bytes out hasn't
 //! tested them.
 
-pub fn main() {
+pub(crate) fn main() {
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
     kernels::run();
     #[cfg(not(all(target_arch = "x86_64", target_pointer_width = "64")))]
@@ -23,17 +26,22 @@ pub fn main() {
 }
 
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-pub mod kernels {
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "test data: noise bytes and small loop counts, truncated on purpose"
+)]
+pub(crate) mod kernels {
     use plumb_tiles::{
         Amx, AmxBf16, AmxFp16, AmxInt8, ROW_BYTES, ROWS, T0, T1, T2, T3, T4, T5, T6, T7,
         TILE_BYTES, tile_span,
     };
 
     /// u64s per packed tile.
-    pub const TILE_WORDS: usize = TILE_BYTES / 8;
-    pub const PAGE: usize = 4096;
+    pub(crate) const TILE_WORDS: usize = TILE_BYTES / 8;
+    pub(crate) const PAGE: usize = 4096;
     /// u64s per 16-page block: one tile at a 4096-byte stride spans it.
-    pub const BLOCK_WORDS: usize = ROWS * PAGE / 8;
+    pub(crate) const BLOCK_WORDS: usize = ROWS * PAGE / 8;
 
     /// `buf` as whole `N`-word units; panics if there is a remainder.
     #[inline(always)]
@@ -69,7 +77,7 @@ pub mod kernels {
     /// Unless `src` and `dst` have the same length, a whole number of tiles.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_copy(amx: Amx, src: &[u64], dst: &mut [u64]) {
+    pub(crate) fn k_tile_copy(amx: Amx, src: &[u64], dst: &mut [u64]) {
         assert_eq!(
             src.len(),
             dst.len(),
@@ -98,7 +106,7 @@ pub mod kernels {
     /// Unless `dst` is a whole number of tiles.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_fill(amx: Amx, pattern: &[u64; TILE_WORDS], dst: &mut [u64]) {
+    pub(crate) fn k_tile_fill(amx: Amx, pattern: &[u64; TILE_WORDS], dst: &mut [u64]) {
         let dst = whole_mut::<TILE_WORDS>(dst);
         amx.with_tiles(|t| {
             t.load_u64::<T2>(pattern, ROW_BYTES);
@@ -116,7 +124,7 @@ pub mod kernels {
     /// Unless `buf` is a whole number of 64 KiB blocks.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_stride_load(amx: Amx, buf: &[u64]) {
+    pub(crate) fn k_tile_stride_load(amx: Amx, buf: &[u64]) {
         let blocks = whole::<BLOCK_WORDS>(buf);
         amx.with_tiles(|t| {
             for block in blocks {
@@ -134,7 +142,7 @@ pub mod kernels {
     /// As [`k_tile_stride_load`].
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_stride_load_t1(amx: Amx, buf: &[u64]) {
+    pub(crate) fn k_tile_stride_load_t1(amx: Amx, buf: &[u64]) {
         let blocks = whole::<BLOCK_WORDS>(buf);
         amx.with_tiles(|t| {
             for block in blocks {
@@ -153,7 +161,7 @@ pub mod kernels {
     /// Unless `buf` is a whole number of 64 KiB blocks.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_stride_fill(amx: Amx, pattern: &[u64; TILE_WORDS], buf: &mut [u64]) {
+    pub(crate) fn k_tile_stride_fill(amx: Amx, pattern: &[u64; TILE_WORDS], buf: &mut [u64]) {
         let blocks = whole_mut::<BLOCK_WORDS>(buf);
         amx.with_tiles(|t| {
             t.load_u64::<T3>(pattern, ROW_BYTES);
@@ -176,7 +184,7 @@ pub mod kernels {
     /// If a tile doesn't fit in `buf`.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_rt_stride_load(
+    pub(crate) fn k_tile_rt_stride_load(
         amx: Amx,
         buf: &[u64],
         stride: usize,
@@ -200,7 +208,7 @@ pub mod kernels {
     /// If a tile doesn't fit in `buf`.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_rt_stride_store(
+    pub(crate) fn k_tile_rt_stride_store(
         amx: Amx,
         pattern: &[u8; TILE_BYTES],
         buf: &mut [u8],
@@ -221,7 +229,7 @@ pub mod kernels {
     /// `c[0] = A0 B0`, `c[1] = A0 B1`, `c[2] = A1 B0`, `c[3] = A1 B1`.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_dpbssd(
+    pub(crate) fn k_tile_dpbssd(
         i8: AmxInt8,
         a: &[[u8; TILE_BYTES]; 2],
         b: &[[u8; TILE_BYTES]; 2],
@@ -254,7 +262,7 @@ pub mod kernels {
     /// One accumulator, `iters` BF16 dot products: `c = iters * A B`.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_dpbf16ps(
+    pub(crate) fn k_tile_dpbf16ps(
         bf16: AmxBf16,
         a: &[u8; TILE_BYTES],
         b: &[u8; TILE_BYTES],
@@ -275,7 +283,7 @@ pub mod kernels {
     /// One accumulator, `iters` FP16 dot products: `c = iters * A B`.
     #[unsafe(no_mangle)]
     #[inline(never)]
-    pub fn k_tile_dpfp16ps(
+    pub(crate) fn k_tile_dpfp16ps(
         fp16: AmxFp16,
         a: &[u8; TILE_BYTES],
         b: &[u8; TILE_BYTES],
@@ -336,9 +344,9 @@ pub mod kernels {
     /// and the reference can't round differently.
     fn small_int_halves(noise: &mut Noise, one_to_four: [u16; 4]) -> ([u8; TILE_BYTES], Vec<i32>) {
         let values: Vec<i32> = (0..TILE_BYTES / 2)
-            .map(|_| (noise.next() % 9) as i32 - 4)
+            .map(|_| (noise.next() % 9).cast_signed() - 4)
             .collect();
-        let mut tile = [0u8; TILE_BYTES];
+        let mut tile = [0_u8; TILE_BYTES];
         for (h, &v) in tile.as_chunks_mut::<2>().0.iter_mut().zip(&values) {
             let magnitude = if v == 0 {
                 0
@@ -350,7 +358,7 @@ pub mod kernels {
         (tile, values)
     }
 
-    pub fn run() {
+    pub(crate) fn run() {
         let Some(amx) = Amx::try_new() else {
             println!("no AMX on this machine; nothing to run");
             return;
@@ -360,10 +368,10 @@ pub mod kernels {
         if let Some(i8) = amx.int8() {
             let iters = 3;
             let (a, b) = ([noise.tile(), noise.tile()], [noise.tile(), noise.tile()]);
-            let mut c = [[0u8; TILE_BYTES]; 4];
+            let mut c = [[0_u8; TILE_BYTES]; 4];
             k_tile_dpbssd(i8, &a, &b, &mut c, iters);
             let signed = |t: &[u8; TILE_BYTES]| -> Vec<i32> {
-                t.iter().map(|&x| i32::from(x as i8)).collect()
+                t.iter().map(|&x| i32::from(x.cast_signed())).collect()
             };
             let (a, b) = (a.each_ref().map(signed), b.each_ref().map(signed));
             for (j, (x, y)) in [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
@@ -385,7 +393,7 @@ pub mod kernels {
                 small_int_halves(&mut noise, one_to_four),
                 small_int_halves(&mut noise, one_to_four),
             );
-            let mut c = [0u8; TILE_BYTES];
+            let mut c = [0_u8; TILE_BYTES];
             k_tile_dpbf16ps(bf16, &a, &b, &mut c, iters);
             let want: Vec<f32> = tdp_reference(&av, &bv, 2)
                 .iter()
@@ -399,7 +407,7 @@ pub mod kernels {
                 small_int_halves(&mut noise, one_to_four),
                 small_int_halves(&mut noise, one_to_four),
             );
-            let mut c = [0u8; TILE_BYTES];
+            let mut c = [0_u8; TILE_BYTES];
             k_tile_dpfp16ps(fp16, &a, &b, &mut c, iters);
             let want: Vec<f32> = tdp_reference(&av, &bv, 2)
                 .iter()
@@ -413,7 +421,7 @@ pub mod kernels {
     fn check_memory_kernels(amx: Amx) {
         // An odd number of tiles, so k_tile_copy's single-tile tail runs too.
         let src: Vec<u64> = (0..(2 * BLOCK_WORDS + TILE_WORDS) as u64).collect();
-        let mut dst = vec![0u64; src.len()];
+        let mut dst = vec![0_u64; src.len()];
         k_tile_copy(amx, &src, &mut dst);
         assert_eq!(src, dst, "k_tile_copy");
 
@@ -443,7 +451,7 @@ pub mod kernels {
 
         // A diagonal: each row one page and one line further on, a new tile every line.
         let (stride, step, tiles) = (PAGE + ROW_BYTES, ROW_BYTES, 16);
-        let mut last = [0u64; TILE_WORDS];
+        let mut last = [0_u64; TILE_WORDS];
         k_tile_rt_stride_load(amx, &src, stride, step / 8, tiles, &mut last);
         let first_word = (tiles - 1) * step / 8;
         for r in 0..ROWS {
@@ -458,7 +466,8 @@ pub mod kernels {
         let pattern = noise.tile();
         let tiles = 8;
         // Two spare lines after the last row, all checked: the span is a whole number of lines.
-        let mut buf = vec![0xEEu8; (tiles - 1) * step + tile_span(stride).unwrap() + 2 * ROW_BYTES];
+        let mut buf =
+            vec![0xEE_u8; (tiles - 1) * step + tile_span(stride).unwrap() + 2 * ROW_BYTES];
         k_tile_rt_stride_store(amx, &pattern, &mut buf, stride, step, tiles);
         // Tile i row r covers line i + 65 r; with fewer than 65 tiles no two rows share a line.
         for (line, bytes) in buf.as_chunks::<ROW_BYTES>().0.iter().enumerate() {

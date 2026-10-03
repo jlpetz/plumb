@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Safe wrappers for the x86 2D tile instruction sets: Intel AMX now, shaped so the x86 ACE
 //! extension can join later.
 //!
@@ -8,7 +11,7 @@
 //!
 //! Stable Rust: every AMX instruction is an `asm!` block with the tile number as a `const`
 //! operand, so no target feature or nightly intrinsic is involved (an ACE backend can't keep all
-//! of that; see [ACE roadmap](#ace-roadmap)). x86_64 with 64-bit pointers only (see
+//! of that; see [ACE roadmap](#ace-roadmap)). `x86_64` with 64-bit pointers only (see
 //! [Platforms](#platforms)); on other targets only the shape constants are defined.
 //!
 //! # Model
@@ -118,7 +121,7 @@
 //!   is compile-checked only (`cargo check --target x86_64-unknown-linux-gnu`); it hasn't run
 //!   on Linux hardware yet.
 //! - **Other OSes**: the CPUID and XCR0 checks only; untested.
-//! - **x32** (`x86_64-unknown-linux-gnux32`, 32-bit pointers on x86_64) gets only the shape
+//! - **x32** (`x86_64-unknown-linux-gnux32`, 32-bit pointers on `x86_64`) gets only the shape
 //!   constants, like non-x86 targets. A 32-bit pointer or `usize` in an `asm!` register operand
 //!   leaves the upper half of the 64-bit register the instruction addresses through undefined,
 //!   so a bounds-checked load or store could still land anywhere.
@@ -140,8 +143,8 @@
 //! | Accumulators | INT32, FP32 | INT32, FP32 |
 //! | Extra state | none | Block Scale Register (1024 bit, XCR0 bit 20) for the MX formats |
 //! | Prerequisites | none beyond AMX-TILE | AVX10.1 + AVX10 aux, AVX-512 state |
-//! | Detection | CPUID `7.0:EDX[24]`, palette 1 present in leaf `1Dh.1` (an ACE-only part sets AMX-TILE too, with palette 1 zeroed), `XCR0[18:17]`; compute: the type's CPUID bit and the TMUL limits in leaf `1Eh` | AMX-TILE, CPUID `7.1:ECX[11]`, ACE_VSN >= 1 (`1Dh.2:EAX[7:0]`), `XCR0[20,18:17]`, `XCR0[7:5]` |
-//! | Compute feature bits | one per type: AMX-INT8, AMX-BF16, AMX-FP16 | none per type: ACE / ACE_VSN enumerates every v1 outer product and BSR op |
+//! | Detection | CPUID `7.0:EDX[24]`, palette 1 present in leaf `1Dh.1` (an ACE-only part sets AMX-TILE too, with palette 1 zeroed), `XCR0[18:17]`; compute: the type's CPUID bit and the TMUL limits in leaf `1Eh` | AMX-TILE, CPUID `7.1:ECX[11]`, `ACE_VSN` >= 1 (`1Dh.2:EAX[7:0]`), `XCR0[20,18:17]`, `XCR0[7:5]` |
+//! | Compute feature bits | one per type: AMX-INT8, AMX-BF16, AMX-FP16 | none per type: ACE / `ACE_VSN` enumerates every v1 outer product and BSR op |
 //!
 //! ACE's narrow data types come from block-scaled (MX) formats, not from smaller tiles, so its
 //! one tile shape is no loss there.
@@ -153,7 +156,7 @@
 //!
 //! | This crate (AMX) | ACE backend (later) |
 //! |---|---|
-//! | [`Amx`], [`AmxInt8`], [`AmxBf16`], [`AmxFp16`] | one `Ace` token (the ACE detection above) for all of ACE v1, since v1 has no per-type feature bits; a later ACE_VSN may add tokens |
+//! | [`Amx`], [`AmxInt8`], [`AmxBf16`], [`AmxFp16`] | one `Ace` token (the ACE detection above) for all of ACE v1, since v1 has no per-type feature bits; a later `ACE_VSN` may add tokens |
 //! | [`Amx::with_tiles`]: palette 1, all 16 x 64, hands out [`Tiles`] | `Ace::with_tiles`: palette 2, hands out its own handle (say `AceTiles<'_>`), because `Tiles`' memory and `TDP*` methods are `#UD` under palette 2. Same entry checks (the per-thread flag and the `STTILECFG` palette byte), so an AMX and an ACE session can't overlap on a thread (one palette at a time; GCC warns against mixing them) |
 //! | [`T0`]..[`T7`], [`ROWS`], [`ROW_BYTES`], [`TILE_BYTES`] | unchanged |
 //! | [`Tiles::zero`] | `AceTiles::zero`, the same `TILEZERO` |
@@ -175,7 +178,7 @@
 //!    block dirtied the upper ZMM state, `vzeroupper` becomes the block's job.
 //! 2. **AVX-512 callers**: safe `#[inline(always)]` methods, licensed by the `Ace` token (ACE
 //!    requires AVX10.1, so the token implies AVX-512), call `#[target_feature]` `#[inline]`
-//!    helpers that hold the ZMM operands. Inside an AVX-512 kernel (fearless_simd's `kernel!`,
+//!    helpers that hold the ZMM operands. Inside an AVX-512 kernel (`fearless_simd`'s `kernel!`,
 //!    a `#[simd]` function at an AVX-512 level, or any `#[target_feature]` function with those
 //!    features) they inline to the bare instruction; anywhere else each is an out-of-line call.
 //!

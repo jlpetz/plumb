@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Large/huge-page buffers and core topology for the multi-threaded DRAM regime.
 //!
 //! Allocation mirrors TMR-APP's non-stitched path (`memory/backend.rs`): one plain
@@ -51,18 +54,35 @@ impl Pages {
 pub fn enable_lock_memory_privilege() -> Result<(), String> {
     let mut token: HANDLE = std::ptr::null_mut();
     // SAFETY: out-param is a local; the pseudo-handle needs no closing.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) } == 0 {
-        return Err(format!("OpenProcessToken failed ({})", unsafe { GetLastError() }));
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    } == 0
+    {
+        return Err(format!("OpenProcessToken failed ({})", unsafe {
+            GetLastError()
+        }));
     }
-    let mut luid = LUID { LowPart: 0, HighPart: 0 };
+    let mut luid = LUID {
+        LowPart: 0,
+        HighPart: 0,
+    };
     // SAFETY: constant wide string; out-param is a local.
     let ok = unsafe { LookupPrivilegeValueW(std::ptr::null(), SE_LOCK_MEMORY_NAME, &mut luid) };
     let result = if ok == 0 {
-        Err(format!("LookupPrivilegeValueW failed ({})", unsafe { GetLastError() }))
+        Err(format!("LookupPrivilegeValueW failed ({})", unsafe {
+            GetLastError()
+        }))
     } else {
         let tp = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
         };
         // SAFETY: `tp` is passed directly as an argument and outlives the call.
         let ok = unsafe {
@@ -75,7 +95,8 @@ pub fn enable_lock_memory_privilege() -> Result<(), String> {
             (0, e) => Err(format!("AdjustTokenPrivileges failed ({e})")),
             (_, 0) => Ok(()),
             (_, 1300) => Err("SeLockMemoryPrivilege is not assigned to this account \
-                (run `tmr.exe --setup-large-pages` elevated, then sign out and back in)".into()),
+                (run `tmr.exe --setup-large-pages` elevated, then sign out and back in)"
+                .into()),
             (_, e) => Err(format!("AdjustTokenPrivileges: unexpected error {e}")),
         }
     };
@@ -104,7 +125,10 @@ impl Region {
 
     /// # Safety
     /// Only one thread may hold the returned slice at a time.
-    #[allow(clippy::mut_from_ref, reason = "each region is driven by exactly one worker thread")]
+    #[allow(
+        clippy::mut_from_ref,
+        reason = "each region is driven by exactly one worker thread"
+    )]
     pub unsafe fn slice(&self) -> &mut [u64] {
         // SAFETY: committed, zeroed allocation of at least `len` u64; exclusivity per contract.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
@@ -159,7 +183,11 @@ pub fn alloc(bytes: usize, pages: Pages) -> Result<Region, u32> {
             size,
             flags,
             PAGE_READWRITE,
-            if params.is_empty() { std::ptr::null_mut() } else { params.as_mut_ptr() },
+            if params.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                params.as_mut_ptr()
+            },
             params.len() as u32,
         )
     };
@@ -167,7 +195,11 @@ pub fn alloc(bytes: usize, pages: Pages) -> Result<Region, u32> {
     if ptr.is_null() {
         return Err(unsafe { GetLastError() });
     }
-    Ok(Region { ptr: ptr as *mut u64, len: bytes / 8, pages })
+    Ok(Region {
+        ptr: ptr as *mut u64,
+        len: bytes / 8,
+        pages,
+    })
 }
 
 /// Logical CPUs ordered physical-cores-first: the first thread of every core, then the second
@@ -185,7 +217,11 @@ pub fn cpu_order() -> Vec<usize> {
     let cores: Vec<Vec<usize>> = info
         .iter()
         .filter(|i| i.Relationship == RelationProcessorCore)
-        .map(|i| (0..usize::BITS as usize).filter(|b| i.ProcessorMask >> b & 1 == 1).collect())
+        .map(|i| {
+            (0..usize::BITS as usize)
+                .filter(|b| i.ProcessorMask >> b & 1 == 1)
+                .collect()
+        })
         .collect();
     let smt = cores.iter().map(Vec::len).max().unwrap_or(1);
     let mut order = Vec::new();
@@ -210,5 +246,7 @@ pub fn physical_cores() -> usize {
     if unsafe { GetLogicalProcessorInformation(info.as_mut_ptr(), &mut len) } == 0 {
         return order.len();
     }
-    info.iter().filter(|i| i.Relationship == RelationProcessorCore).count()
+    info.iter()
+        .filter(|i| i.Relationship == RelationProcessorCore)
+        .count()
 }

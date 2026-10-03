@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `compile_fail` tests for the compile-time half of the crate's safety argument ("Why the tile
 //! operations are safe"). Built only for doctests. Each block differs from working code (the
 //! crate examples) in the one thing it tests, and names the error code where rustc has one, so

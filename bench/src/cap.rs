@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Prototype: a **capability token** for CLFLUSHOPT that combines with a fearless_simd level,
 //! so the stdarch intrinsic inlines inside fearless kernels (no per-line call, no `asm!`).
 //!
@@ -27,7 +30,9 @@ pub struct Clflushopt {
 
 impl Clflushopt {
     pub fn try_new() -> Option<Self> {
-        crate::common::detect().clflushopt.then_some(Self { _private: () })
+        crate::common::detect()
+            .clflushopt
+            .then_some(Self { _private: () })
     }
 }
 
@@ -78,7 +83,12 @@ macro_rules! with_clflushopt {
 /// Mixed write + flush per line, using the CLFLUSHOPT *intrinsic*. Generic over width; the
 /// `Clflushopt` argument is the proof, unused at runtime.
 #[inline(always)]
-fn wflush_body<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, _cf: Clflushopt, buf: &mut [u64], pat: u64) {
+fn wflush_body<S: Simd, V: SimdInt<S, Element = u64>>(
+    simd: S,
+    _cf: Clflushopt,
+    buf: &mut [u64],
+    pat: u64,
+) {
     let p = V::splat(simd, pat);
     for line in buf.as_chunks_mut::<{ LINE / 8 }>().0 {
         for c in line.chunks_exact_mut(V::LEN) {

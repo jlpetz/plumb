@@ -1,4 +1,7 @@
-//! Hardware tests for plumb_tiles. They run tile instructions, so each test first asks for an
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Hardware tests for `plumb_tiles`. They run tile instructions, so each test first asks for an
 //! `Amx` token and skips (with a message) when the machine has none.
 //!
 //! One test binary with modules: they share the helpers below, and the test harness runs them
@@ -31,9 +34,9 @@ fn asm_check_kernels_reject_partial_buffers() {
     let Some(amx) = amx_or_skip("asm_check_kernels_reject_partial_buffers") else {
         return;
     };
-    let pattern = [0u64; TILE_WORDS];
-    let src = vec![0u64; BLOCK_WORDS + TILE_WORDS];
-    let mut dst = vec![0u64; BLOCK_WORDS + TILE_WORDS];
+    let pattern = [0_u64; TILE_WORDS];
+    let src = vec![0_u64; BLOCK_WORDS + TILE_WORDS];
+    let mut dst = vec![0_u64; BLOCK_WORDS + TILE_WORDS];
     let whole = "not a whole number of";
     for (name, msg) in [
         (
@@ -83,13 +86,16 @@ pub fn amx_or_skip(test: &str) -> Option<Amx> {
 }
 
 /// Deterministic test data: the 64-bit MMIX LCG, high half only (its low bits are weak).
+#[derive(Debug)]
 pub struct Lcg(u64);
 
 impl Lcg {
+    /// A generator starting from `seed`.
     pub fn new(seed: u64) -> Self {
         Self(seed)
     }
 
+    /// The next 32 bits (the high half of the state).
     pub fn next_u32(&mut self) -> u32 {
         self.0 = self
             .0
@@ -98,6 +104,11 @@ impl Lcg {
         (self.0 >> 32) as u32
     }
 
+    /// `n` bytes: the low byte of each `next_u32`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "keeping the low byte is the point"
+    )]
     pub fn bytes(&mut self, n: usize) -> Vec<u8> {
         (0..n).map(|_| self.next_u32() as u8).collect()
     }
@@ -118,7 +129,7 @@ pub fn panic_message(f: impl FnOnce()) -> String {
 
 /// STTILECFG: the live tile configuration of this thread (all zero when released).
 pub fn tile_config(_: Amx) -> [u8; 64] {
-    let mut cfg = [0xEEu8; 64];
+    let mut cfg = [0xEE_u8; 64];
     // SAFETY: the token proves AMX-TILE; STTILECFG writes exactly 64 bytes, configured or not.
     unsafe {
         std::arch::asm!("sttilecfg [{}]", in(reg) cfg.as_mut_ptr(), options(nostack, preserves_flags));
@@ -128,10 +139,10 @@ pub fn tile_config(_: Amx) -> [u8; 64] {
 
 /// The descriptor every session should load, written out independently of the crate.
 pub fn expected_config() -> [u8; 64] {
-    let mut b = [0u8; 64];
+    let mut b = [0_u8; 64];
     b[0] = 1;
     for t in 0..8 {
-        b[16 + 2 * t..18 + 2 * t].copy_from_slice(&64u16.to_le_bytes());
+        b[16 + 2 * t..18 + 2 * t].copy_from_slice(&64_u16.to_le_bytes());
         b[48 + t] = 16;
     }
     b

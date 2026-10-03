@@ -18,3 +18,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
+
+# Not the workspace (Linebender) lint set: the bench reproduces TMR's kernels in TMR's own style,
+# e.g. `unsafe fn` bodies without inner `unsafe` blocks, which that set forbids. The set applies
+# to the library crates.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "allow"

@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Cache-line and memory-ordering operations for [fearless_simd]: the instructions a memory
 //! tester (or any bandwidth-bound kernel) needs that a portable SIMD library doesn't have.
 //!
@@ -45,7 +48,10 @@
 //! [fearless_simd]: https://crates.io/crates/fearless_simd
 
 #![no_std]
-#![cfg_attr(feature = "nightly", feature(clflushopt_target_feature, simd_x86_clflushopt))]
+#![cfg_attr(
+    feature = "nightly",
+    feature(clflushopt_target_feature, simd_x86_clflushopt)
+)]
 #![cfg(target_arch = "x86_64")]
 
 pub mod cpu;
@@ -56,7 +62,9 @@ pub mod flush;
 pub mod nt;
 pub mod view;
 
-pub use direct::{DirectSlot, DirectSlots, DirectWriter, Line, Movdir64b, as_lines, as_lines_mut, direct};
+pub use direct::{
+    DirectSlot, DirectSlots, DirectWriter, Line, Movdir64b, as_lines, as_lines_mut, direct,
+};
 pub use flush::{Clflushopt, flush_after};
 pub use nt::{NtBytes, NtSlot, NtSlots, NtStore, NtWriter, nontemporal};
 pub use view::{as_vectors, as_vectors_mut};
@@ -76,9 +84,8 @@ pub struct ReadmeDoctests;
 #[inline(always)]
 pub fn sfence() {
     // SAFETY: SSE is part of every x86_64 baseline.
-    #[allow(unused_unsafe)]
     unsafe {
-        core::arch::x86_64::_mm_sfence()
+        core::arch::x86_64::_mm_sfence();
     }
 }
 
@@ -87,8 +94,7 @@ pub fn sfence() {
 #[inline(always)]
 pub fn mfence() {
     // SAFETY: SSE2 is part of every x86_64 baseline.
-    #[allow(unused_unsafe)]
     unsafe {
-        core::arch::x86_64::_mm_mfence()
+        core::arch::x86_64::_mm_mfence();
     }
 }

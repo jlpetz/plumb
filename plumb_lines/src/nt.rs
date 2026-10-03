@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Non-temporal (streaming) stores, in a scope that ends with `SFENCE`.
 //!
 //! ```
@@ -102,11 +105,15 @@ use core::marker::PhantomData;
 use fearless_simd::{Bytes, Simd, SimdBase};
 
 mod sealed {
+    #[expect(
+        unnameable_types,
+        reason = "This is a sealed trait, so being unnameable is the entire point"
+    )]
     pub trait Sealed {}
 }
 
 /// One non-temporal store of a fearless byte vector (`u8x16`, `u8x32`, `u8x64`) at a given
-/// level. Implemented per (level, width) with `kernel!`, the way fearless_simd implements its own
+/// level. Implemented per (level, width) with `kernel!`, the way `fearless_simd` implements its own
 /// ops, so a generic caller inlines it once the level's target features are in effect. Sealed:
 /// use [`NtStore`] (any fearless vector) or [`nontemporal`].
 pub trait NtBytes<S: Simd>: Copy + sealed::Sealed {
@@ -127,7 +134,10 @@ macro_rules! nt_bytes {
             unsafe fn stream_bytes(self, dst: *mut Self) {
                 fearless_simd::kernel!(
                     #[inline(always)]
-                    #[allow(clippy::not_unsafe_ptr_arg_deref, reason = "the contract is on NtBytes::stream_bytes")]
+                    #[allow(
+                        clippy::not_unsafe_ptr_arg_deref,
+                        reason = "the contract is on NtBytes::stream_bytes"
+                    )]
                     fn k(_t: $Tok, v: fearless_simd::$V<fearless_simd::$Tok>, dst: *mut $arch) {
                         // SAFETY: forwarded from NtBytes::stream_bytes.
                         unsafe { core::arch::x86_64::$stream(dst, v.into()) }
@@ -145,11 +155,19 @@ macro_rules! nt_bytes {
             unsafe fn stream_bytes(self, dst: *mut Self) {
                 fearless_simd::kernel!(
                     #[inline(always)]
-                    #[allow(clippy::not_unsafe_ptr_arg_deref, reason = "the contract is on NtBytes::stream_bytes")]
+                    #[allow(
+                        clippy::not_unsafe_ptr_arg_deref,
+                        reason = "the contract is on NtBytes::stream_bytes"
+                    )]
                     fn k(_t: $Tok, v: fearless_simd::$V<fearless_simd::$Tok>, dst: *mut $arch) {
                         // SAFETY: the vector is `$n` contiguous `$arch` registers wide (fearless
                         // stores it as `[$arch; $n]`); `transmute` checks the size.
-                        let parts = unsafe { core::mem::transmute::<fearless_simd::$V<fearless_simd::$Tok>, [$arch; $n]>(v) };
+                        let parts = unsafe {
+                            core::mem::transmute::<
+                                fearless_simd::$V<fearless_simd::$Tok>,
+                                [$arch; $n],
+                            >(v)
+                        };
                         for (i, part) in parts.into_iter().enumerate() {
                             // SAFETY: forwarded from NtBytes::stream_bytes; part i is at dst + i.
                             unsafe { core::arch::x86_64::$stream(dst.add(i), part) }
@@ -206,6 +224,32 @@ pub struct NtWriter<'a, S: Simd, V> {
     _scope: PhantomData<(&'a mut [V], S)>,
 }
 
+// Manual `Debug` impls: they show the length only. Reading the destination before the scope's
+// SFENCE would break the NT contract, so nothing here may print the slots' contents.
+impl<S: Simd, V> core::fmt::Debug for NtWriter<'_, S, V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NtWriter")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: Simd, V> core::fmt::Debug for NtSlots<'_, S, V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // SAFETY: same allocation, cur <= end.
+        let left = unsafe { self.end.offset_from(self.cur) };
+        f.debug_struct("NtSlots")
+            .field("left", &left)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: Simd, V> core::fmt::Debug for NtSlot<'_, S, V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NtSlot").finish_non_exhaustive()
+    }
+}
+
 impl<'a, S: Simd, V: NtStore<S>> NtWriter<'a, S, V> {
     /// Number of vectors in the destination.
     #[inline(always)]
@@ -222,12 +266,24 @@ impl<'a, S: Simd, V: NtStore<S>> NtWriter<'a, S, V> {
     /// Split into writers for `[0, mid)` and `[mid, len)`. Panics if `mid > len`.
     #[inline(always)]
     pub fn split_at(self, mid: usize) -> (Self, Self) {
-        assert!(mid <= self.len, "NtWriter::split_at: {mid} out of range for {} vectors", self.len);
+        assert!(
+            mid <= self.len,
+            "NtWriter::split_at: {mid} out of range for {} vectors",
+            self.len
+        );
         // SAFETY: mid <= len, so both halves are inside the destination and disjoint.
         let right = unsafe { self.ptr.add(mid) };
         (
-            Self { ptr: self.ptr, len: mid, _scope: PhantomData },
-            Self { ptr: right, len: self.len - mid, _scope: PhantomData },
+            Self {
+                ptr: self.ptr,
+                len: mid,
+                _scope: PhantomData,
+            },
+            Self {
+                ptr: right,
+                len: self.len - mid,
+                _scope: PhantomData,
+            },
         )
     }
 
@@ -262,7 +318,11 @@ impl<'a, S: Simd, V: NtStore<S>> NtWriter<'a, S, V> {
     #[inline(always)]
     pub fn into_slots(self) -> NtSlots<'a, S, V> {
         // SAFETY: `ptr..ptr+len` is this writer's part of the destination.
-        NtSlots { cur: self.ptr, end: unsafe { self.ptr.add(self.len) }, _w: PhantomData }
+        NtSlots {
+            cur: self.ptr,
+            end: unsafe { self.ptr.add(self.len) },
+            _w: PhantomData,
+        }
     }
 }
 
@@ -289,7 +349,10 @@ impl<'w, S: Simd, V: NtStore<S>> Iterator for NtSlots<'w, S, V> {
         if self.cur == self.end {
             return None;
         }
-        let slot = NtSlot { ptr: self.cur, _w: PhantomData };
+        let slot = NtSlot {
+            ptr: self.cur,
+            _w: PhantomData,
+        };
         // SAFETY: cur < end, both in the same allocation.
         self.cur = unsafe { self.cur.add(1) };
         Some(slot)
@@ -324,7 +387,11 @@ impl<S: Simd, V: NtStore<S>> NtSlot<'_, S, V> {
 /// `f` panics. `dst` stays mutably borrowed until the fence has run, so no code can read it with
 /// stores still in flight; see the [module docs](self) for the full argument.
 #[inline(always)]
-pub fn nontemporal<S: Simd, V: NtStore<S>, R>(simd: S, dst: &mut [V], f: impl FnOnce(NtWriter<'_, S, V>) -> R) -> R {
+pub fn nontemporal<S: Simd, V: NtStore<S>, R>(
+    simd: S,
+    dst: &mut [V],
+    f: impl FnOnce(NtWriter<'_, S, V>) -> R,
+) -> R {
     struct Fence;
     impl Drop for Fence {
         #[inline(always)]
@@ -334,5 +401,9 @@ pub fn nontemporal<S: Simd, V: NtStore<S>, R>(simd: S, dst: &mut [V], f: impl Fn
     }
     let _ = simd;
     let _fence = Fence;
-    f(NtWriter { ptr: dst.as_mut_ptr(), len: dst.len(), _scope: PhantomData })
+    f(NtWriter {
+        ptr: dst.as_mut_ptr(),
+        len: dst.len(),
+        _scope: PhantomData,
+    })
 }

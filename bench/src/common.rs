@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Constants, buffers, CPU detection and pinning shared by both kernel sets.
 
 use std::arch::x86_64::{__cpuid_count, _xgetbv};
@@ -56,7 +59,11 @@ impl AlignedBuf {
         // SAFETY: non-zero size; zeroed so every page is touched before timing.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut u64;
         assert!(!ptr.is_null(), "allocation of {bytes} bytes failed");
-        Self { ptr, len: bytes / 8, layout }
+        Self {
+            ptr,
+            len: bytes / 8,
+            layout,
+        }
     }
     pub fn as_mut_slice(&mut self) -> &mut [u64] {
         // SAFETY: owned allocation of `len` u64s, initialised by alloc_zeroed.

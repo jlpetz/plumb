@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Correctness of the plumb_lines kernels (lines.rs) and the ported TMR tests (tmrport.rs).
 //! The view-based kernels take any `&[u64]`, so they're tested on misaligned sub-slices too.
 
@@ -63,8 +66,14 @@ fn view_fill_and_verify_any_alignment() {
         ("pv_256", Box::new(move |b| lines::k_fill_pv_256(t.t2, b))),
     ];
     let mut verifies: Vec<(&str, Reader)> = vec![
-        ("pv_128", Box::new(move |b| lines::k_verify4_pv_128(t.t2, b))),
-        ("pv_256", Box::new(move |b| lines::k_verify4_pv_256(t.t2, b))),
+        (
+            "pv_128",
+            Box::new(move |b| lines::k_verify4_pv_128(t.t2, b)),
+        ),
+        (
+            "pv_256",
+            Box::new(move |b| lines::k_verify4_pv_256(t.t2, b)),
+        ),
     ];
     if let Some(t5) = t.t5 {
         fills.push(("pv_512", Box::new(move |b| lines::k_fill_pv_512(t5, b))));
@@ -78,7 +87,10 @@ fn view_fill_and_verify_any_alignment() {
             for (name, f) in &fills {
                 b.fill(0x0123_4567_89AB_CDEF);
                 f(b);
-                assert!(b.iter().all(|&w| w == PATTERN), "fill {name} off {off} len {len}");
+                assert!(
+                    b.iter().all(|&w| w == PATTERN),
+                    "fill {name} off {off} len {len}"
+                );
             }
             for (name, v) in &verifies {
                 assert_eq!(v(b), 0, "verify {name} false positive off {off} len {len}");
@@ -103,16 +115,46 @@ fn view_positional_nt_and_verify_any_alignment_and_start() {
     let all = words(&mut store);
     for start in [0u64, 1, 12345, 1 << 40] {
         let mut writes: Vec<(&str, Writer)> = vec![
-            ("pl_128", Box::new(move |b| lines::ntw_scope_at::<Avx2, fearless_simd::u64x2<Avx2>>(t2, b, POS_BASE, start))),
-            ("pl_256", Box::new(move |b| lines::ntw_scope_at::<Avx2, u64x4<Avx2>>(t2, b, POS_BASE, start))),
+            (
+                "pl_128",
+                Box::new(move |b| {
+                    lines::ntw_scope_at::<Avx2, fearless_simd::u64x2<Avx2>>(t2, b, POS_BASE, start)
+                }),
+            ),
+            (
+                "pl_256",
+                Box::new(move |b| lines::ntw_scope_at::<Avx2, u64x4<Avx2>>(t2, b, POS_BASE, start)),
+            ),
         ];
         let mut verifies: Vec<(&str, Reader)> = vec![
-            ("pv_128", Box::new(move |b| lines::pos_verify_view_at::<Avx2, fearless_simd::u64x2<Avx2>>(t2, b, POS_BASE, start))),
-            ("pv_256", Box::new(move |b| lines::pos_verify_view_at::<Avx2, u64x4<Avx2>>(t2, b, POS_BASE, start))),
+            (
+                "pv_128",
+                Box::new(move |b| {
+                    lines::pos_verify_view_at::<Avx2, fearless_simd::u64x2<Avx2>>(
+                        t2, b, POS_BASE, start,
+                    )
+                }),
+            ),
+            (
+                "pv_256",
+                Box::new(move |b| {
+                    lines::pos_verify_view_at::<Avx2, u64x4<Avx2>>(t2, b, POS_BASE, start)
+                }),
+            ),
         ];
         if let Some(t5) = t.t5 {
-            writes.push(("pl_512", Box::new(move |b| lines::ntw_scope_at::<Avx512, u64x8<Avx512>>(t5, b, POS_BASE, start))));
-            verifies.push(("pv_512", Box::new(move |b| lines::pos_verify_view_at::<Avx512, u64x8<Avx512>>(t5, b, POS_BASE, start))));
+            writes.push((
+                "pl_512",
+                Box::new(move |b| {
+                    lines::ntw_scope_at::<Avx512, u64x8<Avx512>>(t5, b, POS_BASE, start)
+                }),
+            ));
+            verifies.push((
+                "pv_512",
+                Box::new(move |b| {
+                    lines::pos_verify_view_at::<Avx512, u64x8<Avx512>>(t5, b, POS_BASE, start)
+                }),
+            ));
         }
         for off in OFFSETS {
             for len in LENS {
@@ -121,18 +163,28 @@ fn view_positional_nt_and_verify_any_alignment_and_start() {
                     b.fill(0);
                     w(b);
                     assert!(
-                        b.iter().enumerate().all(|(i, &x)| x == (start + i as u64) ^ POS_BASE),
+                        b.iter()
+                            .enumerate()
+                            .all(|(i, &x)| x == (start + i as u64) ^ POS_BASE),
                         "ntw {name} start {start} off {off} len {len}"
                     );
                 }
                 for (name, v) in &verifies {
-                    assert_eq!(v(b), 0, "posv {name} false positive start {start} off {off} len {len}");
+                    assert_eq!(
+                        v(b),
+                        0,
+                        "posv {name} false positive start {start} off {off} len {len}"
+                    );
                     for i in [0, len / 2, len.saturating_sub(1)] {
                         if i >= len {
                             continue;
                         }
                         b[i] ^= 1 << 63;
-                        assert_eq!(v(b), 1, "posv {name} missed word {i} start {start} off {off} len {len}");
+                        assert_eq!(
+                            v(b),
+                            1,
+                            "posv {name} missed word {i} start {start} off {off} len {len}"
+                        );
                         b[i] ^= 1 << 63;
                     }
                 }
@@ -155,14 +207,32 @@ fn flush_and_direct_kernels() {
     for off in [0usize, 3] {
         let b = &mut all[off..off + 16384];
         let mut ks: Vec<(&str, Writer)> = vec![
-            ("fillflush_pl_256", Box::new(|b| lines::k_fillflush_pl_256(t.t2, t.cf, b))),
-            ("wflush_pltok_256", Box::new(|b| lines::k_wflush_pltok_256(t.t2, t.cf, b))),
-            ("wflush_plentry_256", Box::new(|b| lines::k_wflush_plentry_256(t.t2, t.cf, b))),
+            (
+                "fillflush_pl_256",
+                Box::new(|b| lines::k_fillflush_pl_256(t.t2, t.cf, b)),
+            ),
+            (
+                "wflush_pltok_256",
+                Box::new(|b| lines::k_wflush_pltok_256(t.t2, t.cf, b)),
+            ),
+            (
+                "wflush_plentry_256",
+                Box::new(|b| lines::k_wflush_plentry_256(t.t2, t.cf, b)),
+            ),
         ];
         if let Some(t5) = t.t5 {
-            ks.push(("fillflush_pl_512", Box::new(move |b| lines::k_fillflush_pl_512(t5, t.cf, b))));
-            ks.push(("wflush_pltok_512", Box::new(move |b| lines::k_wflush_pltok_512(t5, t.cf, b))));
-            ks.push(("wflush_plentry_512", Box::new(move |b| lines::k_wflush_plentry_512(t5, t.cf, b))));
+            ks.push((
+                "fillflush_pl_512",
+                Box::new(move |b| lines::k_fillflush_pl_512(t5, t.cf, b)),
+            ));
+            ks.push((
+                "wflush_pltok_512",
+                Box::new(move |b| lines::k_wflush_pltok_512(t5, t.cf, b)),
+            ));
+            ks.push((
+                "wflush_plentry_512",
+                Box::new(move |b| lines::k_wflush_plentry_512(t5, t.cf, b)),
+            ));
         }
         for (name, k) in &ks {
             b.fill(0);
@@ -181,9 +251,14 @@ fn flush_and_direct_kernels() {
     if let Some(t5) = t.t5 {
         b.fill(0);
         lines::k_ntw_plplain_512(t5, b);
-        assert!(b.iter().enumerate().all(|(i, &x)| x == i as u64 ^ POS_BASE), "footgun kernel still correct");
+        assert!(
+            b.iter().enumerate().all(|(i, &x)| x == i as u64 ^ POS_BASE),
+            "footgun kernel still correct"
+        );
     }
-    let Some(md) = t.md else { return eprintln!("skip: MOVDIR64B kernels (not on this CPU)") };
+    let Some(md) = t.md else {
+        return eprintln!("skip: MOVDIR64B kernels (not on this CPU)");
+    };
     b.fill(0);
     lines::k_fillmd_pl(md, b);
     assert!(b.iter().all(|&w| w == PATTERN));
@@ -201,21 +276,54 @@ fn flush_and_direct_kernels() {
 /// wrong phase pattern fails), then a bit is flipped at a varied position (first word, middle,
 /// last word) and bit (0, 31, 63, ...). Both styles must report `injections x per_fault` errors
 /// and leave the same memory.
-fn check_port(name: &str, n_u64: usize, calls_per_chunk: usize, per_fault: u64, oracle: &dyn Fn(usize, &[u64]) -> bool, tmr: Port, pl: Port) {
+fn check_port(
+    name: &str,
+    n_u64: usize,
+    calls_per_chunk: usize,
+    per_fault: u64,
+    oracle: &dyn Fn(usize, &[u64]) -> bool,
+    tmr: Port,
+    pl: Port,
+) {
     let mut a = buf(n_u64);
     let mut b = buf(n_u64);
     let chunks = n_u64.div_ceil(CHUNK_U64);
     let total_calls = chunks * calls_per_chunk;
     // Clean run, oracle-checked at every call: no errors, same memory.
     let (mut ka, mut kb) = (0usize, 0usize);
-    assert_eq!(tmr(words(&mut a), &mut |c| { assert!(oracle(ka, c), "{name}: tmr memory wrong at call {ka}"); ka += 1 }), 0, "{name}: tmr false positive");
-    assert_eq!(pl(words(&mut b), &mut |c| { assert!(oracle(kb, c), "{name}: plumb memory wrong at call {kb}"); kb += 1 }), 0, "{name}: plumb false positive");
-    assert_eq!((ka, kb), (total_calls, total_calls), "{name}: inject call counts");
-    assert_eq!(words(&mut a), words(&mut b), "{name}: styles left different memory");
+    assert_eq!(
+        tmr(words(&mut a), &mut |c| {
+            assert!(oracle(ka, c), "{name}: tmr memory wrong at call {ka}");
+            ka += 1
+        }),
+        0,
+        "{name}: tmr false positive"
+    );
+    assert_eq!(
+        pl(words(&mut b), &mut |c| {
+            assert!(oracle(kb, c), "{name}: plumb memory wrong at call {kb}");
+            kb += 1
+        }),
+        0,
+        "{name}: plumb false positive"
+    );
+    assert_eq!(
+        (ka, kb),
+        (total_calls, total_calls),
+        "{name}: inject call counts"
+    );
+    assert_eq!(
+        words(&mut a),
+        words(&mut b),
+        "{name}: styles left different memory"
+    );
     // Faulted run.
     let targets = [0, 1, total_calls / 2, total_calls - 1];
     let inject = |k: &mut usize, c: &mut [u64]| {
-        assert!(oracle(*k, c), "{name}: memory wrong before injection at call {k}");
+        assert!(
+            oracle(*k, c),
+            "{name}: memory wrong before injection at call {k}"
+        );
         if let Some(t) = targets.iter().position(|&x| x == *k) {
             let i = [0, c.len() / 2, c.len() - 1, (*k * 7919) % c.len()][t];
             let bit = [0, 31, 63, *k % 64][t];
@@ -226,10 +334,18 @@ fn check_port(name: &str, n_u64: usize, calls_per_chunk: usize, per_fault: u64, 
     let (mut ka, mut kb) = (0, 0);
     let ea = tmr(words(&mut a), &mut |c| inject(&mut ka, c));
     let eb = pl(words(&mut b), &mut |c| inject(&mut kb, c));
-    let want = targets.iter().collect::<std::collections::BTreeSet<_>>().len() as u64 * per_fault;
+    let want = targets
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64
+        * per_fault;
     assert_eq!(ea, want, "{name}: tmr errors");
     assert_eq!(eb, want, "{name}: plumb errors");
-    assert_eq!(words(&mut a), words(&mut b), "{name}: styles left different memory after faults");
+    assert_eq!(
+        words(&mut a),
+        words(&mut b),
+        "{name}: styles left different memory after faults"
+    );
 }
 
 #[test]
@@ -239,11 +355,16 @@ fn ported_tests_agree_and_catch_faults() {
     // Three full chunks and a partial one of 40 u64 (5 or 10 vectors: not a multiple of 4, so
     // the remainder loops of both styles run).
     let n = CHUNK_U64 * 3 + 40;
-    let sb = |k: usize, c: &[u64]| c.iter().all(|&w| w == [STUCKBIT_P1, STUCKBIT_P2, STUCKBIT_P1][k % 3]);
+    let sb = |k: usize, c: &[u64]| {
+        c.iter()
+            .all(|&w| w == [STUCKBIT_P1, STUCKBIT_P2, STUCKBIT_P1][k % 3])
+    };
     let refresh = |_: usize, c: &[u64]| c.iter().all(|&w| w == REFRESH_PATTERN);
     let simplent = |k: usize, c: &[u64]| {
         let start = (k / WRC * CHUNK_U64) as u64;
-        c.iter().enumerate().all(|(i, &w)| w == (start + i as u64) ^ POS_BASE)
+        c.iter()
+            .enumerate()
+            .all(|(i, &w)| w == (start + i as u64) ^ POS_BASE)
     };
     let vr = VERIFY_REPS as u64;
     macro_rules! both {
@@ -263,9 +384,25 @@ fn ported_tests_agree_and_catch_faults() {
                 &|b, f| tmrport::simplent_pl::<$Tok, $V, _>(tok, b, f));
         }};
     }
-    both!("256", Avx2, t.t2, u64x4<Avx2>, sb_tmr_256, refresh_tmr_256, simplent_tmr_256);
+    both!(
+        "256",
+        Avx2,
+        t.t2,
+        u64x4<Avx2>,
+        sb_tmr_256,
+        refresh_tmr_256,
+        simplent_tmr_256
+    );
     if let (Some(t5), true) = (t.t5, t.tmr512) {
-        both!("512", Avx512, t5, u64x8<Avx512>, sb_tmr_512, refresh_tmr_512, simplent_tmr_512);
+        both!(
+            "512",
+            Avx512,
+            t5,
+            u64x8<Avx512>,
+            sb_tmr_512,
+            refresh_tmr_512,
+            simplent_tmr_512
+        );
     }
 }
 
@@ -280,19 +417,59 @@ fn port_entries_are_wired_right() {
     let positional = |b: &[u64]| b.iter().enumerate().all(|(i, &w)| w == i as u64 ^ POS_BASE);
     let mut cases: Vec<(&str, Entry, u64)> = vec![
         ("k_sb_tmr_256", Box::new(tmrport::k_sb_tmr_256), STUCKBIT_P1),
-        ("k_sbnf_tmr_256", Box::new(tmrport::k_sbnf_tmr_256), STUCKBIT_P1),
-        ("k_sb_pl_256", Box::new(|b| tmrport::k_sb_pl_256(t.t2, t.cf, b)), STUCKBIT_P1),
-        ("k_sbnf_pl_256", Box::new(|b| tmrport::k_sbnf_pl_256(t.t2, t.cf, b)), STUCKBIT_P1),
-        ("k_refresh_tmr_256", Box::new(tmrport::k_refresh_tmr_256), REFRESH_PATTERN),
-        ("k_refresh_pl_256", Box::new(|b| tmrport::k_refresh_pl_256(t.t2, t.cf, b)), REFRESH_PATTERN),
+        (
+            "k_sbnf_tmr_256",
+            Box::new(tmrport::k_sbnf_tmr_256),
+            STUCKBIT_P1,
+        ),
+        (
+            "k_sb_pl_256",
+            Box::new(|b| tmrport::k_sb_pl_256(t.t2, t.cf, b)),
+            STUCKBIT_P1,
+        ),
+        (
+            "k_sbnf_pl_256",
+            Box::new(|b| tmrport::k_sbnf_pl_256(t.t2, t.cf, b)),
+            STUCKBIT_P1,
+        ),
+        (
+            "k_refresh_tmr_256",
+            Box::new(tmrport::k_refresh_tmr_256),
+            REFRESH_PATTERN,
+        ),
+        (
+            "k_refresh_pl_256",
+            Box::new(|b| tmrport::k_refresh_pl_256(t.t2, t.cf, b)),
+            REFRESH_PATTERN,
+        ),
     ];
     if let (Some(t5), true) = (t.t5, t.tmr512) {
         cases.push(("k_sb_tmr_512", Box::new(tmrport::k_sb_tmr_512), STUCKBIT_P1));
-        cases.push(("k_sbnf_tmr_512", Box::new(tmrport::k_sbnf_tmr_512), STUCKBIT_P1));
-        cases.push(("k_sb_pl_512", Box::new(move |b| tmrport::k_sb_pl_512(t5, t.cf, b)), STUCKBIT_P1));
-        cases.push(("k_sbnf_pl_512", Box::new(move |b| tmrport::k_sbnf_pl_512(t5, t.cf, b)), STUCKBIT_P1));
-        cases.push(("k_refresh_tmr_512", Box::new(tmrport::k_refresh_tmr_512), REFRESH_PATTERN));
-        cases.push(("k_refresh_pl_512", Box::new(move |b| tmrport::k_refresh_pl_512(t5, t.cf, b)), REFRESH_PATTERN));
+        cases.push((
+            "k_sbnf_tmr_512",
+            Box::new(tmrport::k_sbnf_tmr_512),
+            STUCKBIT_P1,
+        ));
+        cases.push((
+            "k_sb_pl_512",
+            Box::new(move |b| tmrport::k_sb_pl_512(t5, t.cf, b)),
+            STUCKBIT_P1,
+        ));
+        cases.push((
+            "k_sbnf_pl_512",
+            Box::new(move |b| tmrport::k_sbnf_pl_512(t5, t.cf, b)),
+            STUCKBIT_P1,
+        ));
+        cases.push((
+            "k_refresh_tmr_512",
+            Box::new(tmrport::k_refresh_tmr_512),
+            REFRESH_PATTERN,
+        ));
+        cases.push((
+            "k_refresh_pl_512",
+            Box::new(move |b| tmrport::k_refresh_pl_512(t5, t.cf, b)),
+            REFRESH_PATTERN,
+        ));
     }
     for (name, k, want) in &cases {
         b.fill(0);
@@ -301,11 +478,17 @@ fn port_entries_are_wired_right() {
     }
     let mut nt: Vec<(&str, Entry)> = vec![
         ("k_simplent_tmr_256", Box::new(tmrport::k_simplent_tmr_256)),
-        ("k_simplent_pl_256", Box::new(|b| tmrport::k_simplent_pl_256(t.t2, b))),
+        (
+            "k_simplent_pl_256",
+            Box::new(|b| tmrport::k_simplent_pl_256(t.t2, b)),
+        ),
     ];
     if let (Some(t5), true) = (t.t5, t.tmr512) {
         nt.push(("k_simplent_tmr_512", Box::new(tmrport::k_simplent_tmr_512)));
-        nt.push(("k_simplent_pl_512", Box::new(move |b| tmrport::k_simplent_pl_512(t5, b))));
+        nt.push((
+            "k_simplent_pl_512",
+            Box::new(move |b| tmrport::k_simplent_pl_512(t5, b)),
+        ));
     }
     for (name, k) in &nt {
         b.fill(0);

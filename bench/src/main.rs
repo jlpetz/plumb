@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! fearless-test: can fearless_simd replace TMR-APP's per-width `macro_rules!` SIMD kernels?
 //! (TODO 84.) Each TMR kernel shape is written twice, in `tmr.rs` (TMR's current style) and
 //! `fs.rs` (one generic fearless_simd body), and timed side by side on the same buffers.
@@ -28,8 +31,6 @@ mod common;
 mod fs;
 mod lines;
 mod mem;
-mod tmr;
-mod tmrport;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -37,6 +38,8 @@ mod tests_plumb;
 #[cfg(test)]
 mod tests_tiles;
 mod tiles;
+mod tmr;
+mod tmrport;
 
 use common::*;
 use fearless_simd::{Avx2, Avx512, Level};
@@ -145,7 +148,10 @@ fn parse_opts() -> Opts {
             }
             "--only" => o.only = Some(val(i).split(',').map(str::to_string).collect()),
             "--threads" => {
-                o.threads = val(i).split(',').map(|t| t.parse().unwrap_or_else(|_| usage())).collect()
+                o.threads = val(i)
+                    .split(',')
+                    .map(|t| t.parse().unwrap_or_else(|_| usage()))
+                    .collect()
             }
             "--per-thread-mib" => o.per_thread_mib = num(i),
             "--pages" => {
@@ -185,7 +191,10 @@ struct Toks {
 
 macro_rules! v {
     ($name:literal, $f:expr) => {
-        Variant { name: $name, run: Box::new($f) }
+        Variant {
+            name: $name,
+            run: Box::new($f),
+        }
     };
 }
 
@@ -219,22 +228,50 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
 
     let mut vs = vec![
         v!("tmr_128", w(tmr::k_fill_tmr_128)),
-        v!("fs_128", move |b| { fs::k_fill_fs_128(t2, b); 0 }),
+        v!("fs_128", move |b| {
+            fs::k_fill_fs_128(t2, b);
+            0
+        }),
         v!("tmr_256", w(tmr::k_fill_tmr_256)),
-        v!("fs_256", move |b| { fs::k_fill_fs_256(t2, b); 0 }),
+        v!("fs_256", move |b| {
+            fs::k_fill_fs_256(t2, b);
+            0
+        }),
     ];
     push_if(&mut vs, tmr512, v!("tmr_512", w(tmr::k_fill_tmr_512)));
     if let Some(t5) = t512 {
-        vs.push(v!("fs_512", move |b| { fs::k_fill_fs_512(t5, b); 0 }));
+        vs.push(v!("fs_512", move |b| {
+            fs::k_fill_fs_512(t5, b);
+            0
+        }));
     }
-    vs.push(v!("fs_auto", move |b| { fs::k_fill_fs_auto(lvl, b); 0 }));
-    vs.push(v!("pv_128", move |b| { lines::k_fill_pv_128(t2, b); 0 }));
-    vs.push(v!("pv_256", move |b| { lines::k_fill_pv_256(t2, b); 0 }));
+    vs.push(v!("fs_auto", move |b| {
+        fs::k_fill_fs_auto(lvl, b);
+        0
+    }));
+    vs.push(v!("pv_128", move |b| {
+        lines::k_fill_pv_128(t2, b);
+        0
+    }));
+    vs.push(v!("pv_256", move |b| {
+        lines::k_fill_pv_256(t2, b);
+        0
+    }));
     if let Some(t5) = t512 {
-        vs.push(v!("pv_512", move |b| { lines::k_fill_pv_512(t5, b); 0 }));
+        vs.push(v!("pv_512", move |b| {
+            lines::k_fill_pv_512(t5, b);
+            0
+        }));
     }
-    gs.push(Group { id: "fill", title: "constant fill (StuckBit/Refresh write)", setup: None,
-        prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+    gs.push(Group {
+        id: "fill",
+        title: "constant fill (StuckBit/Refresh write)",
+        setup: None,
+        prime: Prime::None,
+        expect_zero: false,
+        bytes_mult: 1.0,
+        variants: vs,
+    });
 
     let mut vs = vec![
         v!("tmr_128", r(tmr::k_verify4_tmr_128)),
@@ -267,28 +304,55 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             vs.push(v!("fssplit_512", move |b| fs::k_verify4_fssplit_512(t5, b)));
         }
         // Footguns: a non-inlined helper in each style (L2 only; slow by design).
-        push_if(&mut vs, tmr512, v!("tmrhelper_512", r(tmr::k_verify4_tmrhelper_512)));
+        push_if(
+            &mut vs,
+            tmr512,
+            v!("tmrhelper_512", r(tmr::k_verify4_tmrhelper_512)),
+        );
         if let Some(t5) = t512 {
-            vs.push(v!("fshelper_512", move |b| fs::k_verify4_fshelper_512(t5, b)));
+            vs.push(v!("fshelper_512", move |b| fs::k_verify4_fshelper_512(
+                t5, b
+            )));
         }
     }
-    gs.push(Group { id: "verify4", title: "4-accumulator verify (StuckBit verify)",
+    gs.push(Group {
+        id: "verify4",
+        title: "4-accumulator verify (StuckBit verify)",
         setup: Some(Box::new(w(tmr::k_fill_tmr_256))),
         prime: if dram { Prime::Flush } else { Prime::None },
-        expect_zero: true, bytes_mult: 1.0, variants: vs });
+        expect_zero: true,
+        bytes_mult: 1.0,
+        variants: vs,
+    });
 
     let mut vs = vec![
         v!("tmr_128", w(tmr::k_posw_tmr_128)),
-        v!("fs_128", move |b| { fs::k_posw_fs_128(t2, b); 0 }),
+        v!("fs_128", move |b| {
+            fs::k_posw_fs_128(t2, b);
+            0
+        }),
         v!("tmr_256", w(tmr::k_posw_tmr_256)),
-        v!("fs_256", move |b| { fs::k_posw_fs_256(t2, b); 0 }),
+        v!("fs_256", move |b| {
+            fs::k_posw_fs_256(t2, b);
+            0
+        }),
     ];
     push_if(&mut vs, tmr512, v!("tmr_512", w(tmr::k_posw_tmr_512)));
     if let Some(t5) = t512 {
-        vs.push(v!("fs_512", move |b| { fs::k_posw_fs_512(t5, b); 0 }));
+        vs.push(v!("fs_512", move |b| {
+            fs::k_posw_fs_512(t5, b);
+            0
+        }));
     }
-    gs.push(Group { id: "posw", title: "positional write idx^base (SimpleTest Mode 0/1)",
-        setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+    gs.push(Group {
+        id: "posw",
+        title: "positional write idx^base (SimpleTest Mode 0/1)",
+        setup: None,
+        prime: Prime::None,
+        expect_zero: false,
+        bytes_mult: 1.0,
+        variants: vs,
+    });
 
     let mut vs = vec![
         v!("tmr_128", r(tmr::k_posv_tmr_128)),
@@ -305,23 +369,44 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
     if let Some(t5) = t512 {
         vs.push(v!("pv_512", move |b| lines::k_posv_pv_512(t5, b)));
     }
-    gs.push(Group { id: "posv", title: "positional verify, 1 accumulator (SimpleTest verify)",
+    gs.push(Group {
+        id: "posv",
+        title: "positional verify, 1 accumulator (SimpleTest verify)",
         setup: Some(Box::new(w(tmr::k_posw_tmr_256))),
         prime: if dram { Prime::Flush } else { Prime::None },
-        expect_zero: true, bytes_mult: 1.0, variants: vs });
+        expect_zero: true,
+        bytes_mult: 1.0,
+        variants: vs,
+    });
 
     let mut vs = vec![
         v!("tmr_128", w(tmr::k_lcgw_tmr_128)),
-        v!("fs_128", move |b| { fs::k_lcgw_fs_128(t2, b); 0 }),
+        v!("fs_128", move |b| {
+            fs::k_lcgw_fs_128(t2, b);
+            0
+        }),
         v!("tmr_256", w(tmr::k_lcgw_tmr_256)),
-        v!("fs_256", move |b| { fs::k_lcgw_fs_256(t2, b); 0 }),
+        v!("fs_256", move |b| {
+            fs::k_lcgw_fs_256(t2, b);
+            0
+        }),
     ];
     push_if(&mut vs, tmr512, v!("tmr_512", w(tmr::k_lcgw_tmr_512)));
     if let Some(t5) = t512 {
-        vs.push(v!("fs_512", move |b| { fs::k_lcgw_fs_512(t5, b); 0 }));
+        vs.push(v!("fs_512", move |b| {
+            fs::k_lcgw_fs_512(t5, b);
+            0
+        }));
     }
-    gs.push(Group { id: "lcgw", title: "LCG write state*m+a (SimpleTest Mode 2, 64-bit mul)",
-        setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+    gs.push(Group {
+        id: "lcgw",
+        title: "LCG write state*m+a (SimpleTest Mode 2, 64-bit mul)",
+        setup: None,
+        prime: Prime::None,
+        expect_zero: false,
+        bytes_mult: 1.0,
+        variants: vs,
+    });
 
     // flush: L2 = 256 KiB of dirty lines; DRAM = a mostly-evicted range (TMR's use).
     let vs = vec![
@@ -330,50 +415,146 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             unsafe { tmr::k_flush_tmr(b.as_ptr(), b.len()) };
             0
         }),
-        v!("fsintr", move |b| { fs::k_flush_fsintr(t2, b); 0 }),
-        v!("fsasm", move |b| { fs::k_flush_fsasm(t2, b); 0 }),
-        v!("fscap", move |b| { cap::k_flush_fscap(t2, cf, b); 0 }),
-        v!("pl", move |b| { lines::k_flush_pl(pcf, b); 0 }),
+        v!("fsintr", move |b| {
+            fs::k_flush_fsintr(t2, b);
+            0
+        }),
+        v!("fsasm", move |b| {
+            fs::k_flush_fsasm(t2, b);
+            0
+        }),
+        v!("fscap", move |b| {
+            cap::k_flush_fscap(t2, cf, b);
+            0
+        }),
+        v!("pl", move |b| {
+            lines::k_flush_pl(pcf, b);
+            0
+        }),
     ];
-    gs.push(Group { id: "flush", title: "CLFLUSHOPT range + MFENCE (flush_range_to_dram)",
-        setup: None, prime: Prime::Dirty, expect_zero: false, bytes_mult: 1.0, variants: vs });
+    gs.push(Group {
+        id: "flush",
+        title: "CLFLUSHOPT range + MFENCE (flush_range_to_dram)",
+        setup: None,
+        prime: Prime::Dirty,
+        expect_zero: false,
+        bytes_mult: 1.0,
+        variants: vs,
+    });
 
     if dram {
         let mut vs = vec![
             v!("tmr_128", w(tmr::k_ntw_tmr_128)),
-            v!("fs_128", move |b| { fs::k_ntw_fs_128(t2, b); 0 }),
+            v!("fs_128", move |b| {
+                fs::k_ntw_fs_128(t2, b);
+                0
+            }),
             v!("tmr_256", w(tmr::k_ntw_tmr_256)),
-            v!("fs_256", move |b| { fs::k_ntw_fs_256(t2, b); 0 }),
+            v!("fs_256", move |b| {
+                fs::k_ntw_fs_256(t2, b);
+                0
+            }),
         ];
         push_if(&mut vs, tmr512, v!("tmr_512", w(tmr::k_ntw_tmr_512)));
         if let Some(t5) = t512 {
-            vs.push(v!("fs_512", move |b| { fs::k_ntw_fs_512(t5, b); 0 }));
-            vs.push(v!("fsk_512", move |b| { fs::k_ntw_fsk_512(t5, b); 0 }));
-            vs.push(v!("pl_512", move |b| { lines::k_ntw_pl_512(t5, b); 0 }));
+            vs.push(v!("fs_512", move |b| {
+                fs::k_ntw_fs_512(t5, b);
+                0
+            }));
+            vs.push(v!("fsk_512", move |b| {
+                fs::k_ntw_fsk_512(t5, b);
+                0
+            }));
+            vs.push(v!("pl_512", move |b| {
+                lines::k_ntw_pl_512(t5, b);
+                0
+            }));
         }
-        vs.insert(2, v!("pl_128", move |b| { lines::k_ntw_pl_128(t2, b); 0 }));
-        vs.insert(5, v!("pl_256", move |b| { lines::k_ntw_pl_256(t2, b); 0 }));
-        gs.push(Group { id: "ntw", title: "NT positional write, 4x unroll + SFENCE (SimpleNT)",
-            setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+        vs.insert(
+            2,
+            v!("pl_128", move |b| {
+                lines::k_ntw_pl_128(t2, b);
+                0
+            }),
+        );
+        vs.insert(
+            5,
+            v!("pl_256", move |b| {
+                lines::k_ntw_pl_256(t2, b);
+                0
+            }),
+        );
+        gs.push(Group {
+            id: "ntw",
+            title: "NT positional write, 4x unroll + SFENCE (SimpleNT)",
+            setup: None,
+            prime: Prime::None,
+            expect_zero: false,
+            bytes_mult: 1.0,
+            variants: vs,
+        });
 
         let mut vs = vec![
             v!("tmr_256", w(tmr::k_wflush_tmr_256)),
-            v!("fsintr_256", move |b| { fs::k_wflush_fsintr_256(t2, b); 0 }),
-            v!("fsasm_256", move |b| { fs::k_wflush_fsasm_256(t2, b); 0 }),
-            v!("fscap_256", move |b| { cap::k_wflush_fscap_256(t2, cf, b, PATTERN); 0 }),
+            v!("fsintr_256", move |b| {
+                fs::k_wflush_fsintr_256(t2, b);
+                0
+            }),
+            v!("fsasm_256", move |b| {
+                fs::k_wflush_fsasm_256(t2, b);
+                0
+            }),
+            v!("fscap_256", move |b| {
+                cap::k_wflush_fscap_256(t2, cf, b, PATTERN);
+                0
+            }),
         ];
         push_if(&mut vs, tmr512, v!("tmr_512", w(tmr::k_wflush_tmr_512)));
         if let Some(t5) = t512 {
-            vs.push(v!("fsintr_512", move |b| { fs::k_wflush_fsintr_512(t5, b); 0 }));
-            vs.push(v!("fsasm_512", move |b| { fs::k_wflush_fsasm_512(t5, b); 0 }));
-            vs.push(v!("fscap_512", move |b| { cap::k_wflush_fscap_512(t5, cf, b, PATTERN); 0 }));
-            vs.push(v!("pltok_512", move |b| { lines::k_wflush_pltok_512(t5, pcf, b); 0 }));
-            vs.push(v!("plentry_512", move |b| { lines::k_wflush_plentry_512(t5, pcf, b); 0 }));
+            vs.push(v!("fsintr_512", move |b| {
+                fs::k_wflush_fsintr_512(t5, b);
+                0
+            }));
+            vs.push(v!("fsasm_512", move |b| {
+                fs::k_wflush_fsasm_512(t5, b);
+                0
+            }));
+            vs.push(v!("fscap_512", move |b| {
+                cap::k_wflush_fscap_512(t5, cf, b, PATTERN);
+                0
+            }));
+            vs.push(v!("pltok_512", move |b| {
+                lines::k_wflush_pltok_512(t5, pcf, b);
+                0
+            }));
+            vs.push(v!("plentry_512", move |b| {
+                lines::k_wflush_plentry_512(t5, pcf, b);
+                0
+            }));
         }
-        vs.insert(4, v!("pltok_256", move |b| { lines::k_wflush_pltok_256(t2, pcf, b); 0 }));
-        vs.insert(5, v!("plentry_256", move |b| { lines::k_wflush_plentry_256(t2, pcf, b); 0 }));
-        gs.push(Group { id: "wflush", title: "write line + CLFLUSHOPT it, same loop (mixed)",
-            setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+        vs.insert(
+            4,
+            v!("pltok_256", move |b| {
+                lines::k_wflush_pltok_256(t2, pcf, b);
+                0
+            }),
+        );
+        vs.insert(
+            5,
+            v!("plentry_256", move |b| {
+                lines::k_wflush_plentry_256(t2, pcf, b);
+                0
+            }),
+        );
+        gs.push(Group {
+            id: "wflush",
+            title: "write line + CLFLUSHOPT it, same loop (mixed)",
+            setup: None,
+            prime: Prime::None,
+            expect_zero: false,
+            bytes_mult: 1.0,
+            variants: vs,
+        });
 
         let mut vs = vec![
             v!("tmr_256", r(tmr::k_pfv_tmr_256)),
@@ -385,9 +566,15 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             vs.push(v!("fsptr_512", move |b| fs::k_pfv_fsptr_512(t5, b)));
         }
         vs.insert(2, v!("fsptr_256", move |b| fs::k_pfv_fsptr_256(t2, b)));
-        gs.push(Group { id: "pfv", title: "4-accumulator verify + PREFETCHT0 per line",
-            setup: Some(Box::new(w(tmr::k_fill_tmr_256))), prime: Prime::Flush,
-            expect_zero: true, bytes_mult: 1.0, variants: vs });
+        gs.push(Group {
+            id: "pfv",
+            title: "4-accumulator verify + PREFETCHT0 per line",
+            setup: Some(Box::new(w(tmr::k_fill_tmr_256))),
+            prime: Prime::Flush,
+            expect_zero: true,
+            bytes_mult: 1.0,
+            variants: vs,
+        });
 
         let mut vs = Vec::new();
         if tmr512 {
@@ -399,7 +586,11 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             }));
         }
         if let Some(t5) = t512 {
-            vs.push(v!("nt_fs_512", move |b| { let (d, s) = split(b); fs::k_copynt_fs_512(t5, d, s); 0 }));
+            vs.push(v!("nt_fs_512", move |b| {
+                let (d, s) = split(b);
+                fs::k_copynt_fs_512(t5, d, s);
+                0
+            }));
         }
         if t.cpu.movdir64b {
             vs.push(v!("md_tmr", |b| {
@@ -408,54 +599,130 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
                 unsafe { tmr::k_copymd_tmr(d.as_mut_ptr(), s.as_ptr(), s.len()) };
                 0
             }));
-            vs.push(v!("md_fs", move |b| { let (d, s) = split(b); fs::k_copymd_fs(t2, d, s); 0 }));
+            vs.push(v!("md_fs", move |b| {
+                let (d, s) = split(b);
+                fs::k_copymd_fs(t2, d, s);
+                0
+            }));
         }
         if let Some(m) = md {
-            vs.push(v!("md_pl", move |b| { let (d, s) = split(b); lines::k_copymd_pl(m, d, s); 0 }));
+            vs.push(v!("md_pl", move |b| {
+                let (d, s) = split(b);
+                lines::k_copymd_pl(m, d, s);
+                0
+            }));
         }
-        gs.push(Group { id: "copy", title: "copy half -> half: NT-512 vs MOVDIR64B (GiB/s copied)",
-            setup: None, prime: Prime::Flush, expect_zero: false, bytes_mult: 0.5, variants: vs });
+        gs.push(Group {
+            id: "copy",
+            title: "copy half -> half: NT-512 vs MOVDIR64B (GiB/s copied)",
+            setup: None,
+            prime: Prime::Flush,
+            expect_zero: false,
+            bytes_mult: 0.5,
+            variants: vs,
+        });
 
         // Write a chunk then flush everything written (TMR: fill + flush_range_to_dram).
         let mut vs = vec![
-            v!("tmr_256", |b| { lines::k_fillflush_tmr_256(b); 0 }),
-            v!("pl_256", move |b| { lines::k_fillflush_pl_256(t2, pcf, b); 0 }),
+            v!("tmr_256", |b| {
+                lines::k_fillflush_tmr_256(b);
+                0
+            }),
+            v!("pl_256", move |b| {
+                lines::k_fillflush_pl_256(t2, pcf, b);
+                0
+            }),
         ];
-        push_if(&mut vs, tmr512, v!("tmr_512", |b| { lines::k_fillflush_tmr_512(b); 0 }));
+        push_if(
+            &mut vs,
+            tmr512,
+            v!("tmr_512", |b| {
+                lines::k_fillflush_tmr_512(b);
+                0
+            }),
+        );
         if let Some(t5) = t512 {
-            vs.push(v!("pl_512", move |b| { lines::k_fillflush_pl_512(t5, pcf, b); 0 }));
+            vs.push(v!("pl_512", move |b| {
+                lines::k_fillflush_pl_512(t5, pcf, b);
+                0
+            }));
         }
         if let Some(m) = md {
-            vs.push(v!("md_pl", move |b| { lines::k_fillmd_pl(m, b); 0 }));
+            vs.push(v!("md_pl", move |b| {
+                lines::k_fillmd_pl(m, b);
+                0
+            }));
         }
-        gs.push(Group { id: "fillflush", title: "fill then flush the range (flush_after scope); md_pl = MOVDIR64B fill",
-            setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+        gs.push(Group {
+            id: "fillflush",
+            title: "fill then flush the range (flush_after scope); md_pl = MOVDIR64B fill",
+            setup: None,
+            prime: Prime::None,
+            expect_zero: false,
+            bytes_mult: 1.0,
+            variants: vs,
+        });
 
         // Ported TMR tests (tmrport.rs). Throughput counts TMR's traffic: StuckBit 3 writes +
         // 3 reads, Refresh 1 + 1, SimpleNT 4 x (1 write + 5 reads).
-        gs.push(port_group("sb", "TMR StuckBit port, flush before verify (3 phases)", t, 6.0));
-        gs.push(port_group("refresh", "TMR Refresh port, flush before verify (sleep omitted)", t, 2.0));
-        gs.push(port_group("simplent", "TMR SimpleNT port: 4 x (NT positional write, 5 verifies) per chunk", t, 24.0));
+        gs.push(port_group(
+            "sb",
+            "TMR StuckBit port, flush before verify (3 phases)",
+            t,
+            6.0,
+        ));
+        gs.push(port_group(
+            "refresh",
+            "TMR Refresh port, flush before verify (sleep omitted)",
+            t,
+            2.0,
+        ));
+        gs.push(port_group(
+            "simplent",
+            "TMR SimpleNT port: 4 x (NT positional write, 5 verifies) per chunk",
+            t,
+            24.0,
+        ));
 
         // AMX (plumb_tiles, tiles.rs): tile loads and stores as a DRAM access path, against
         // AVX-512 kernels moving the same bytes.
         if let Some(amx) = t.amx {
             let mut vs = vec![v!("amx", move |b| tiles::k_amx_read(amx, b))];
-            push_if(&mut vs, tmr512, v!("zmm_tmr_512", r(tmr::k_verify4_tmr_512)));
+            push_if(
+                &mut vs,
+                tmr512,
+                v!("zmm_tmr_512", r(tmr::k_verify4_tmr_512)),
+            );
             if let Some(t5) = t512 {
-                vs.push(v!("amx_verify_512", move |b| tiles::k_amx_verify_512(t5, amx, b)));
+                vs.push(v!("amx_verify_512", move |b| tiles::k_amx_verify_512(
+                    t5, amx, b
+                )));
             }
             gs.push(Group { id: "amxread",
                 title: "AMX read: 4 tile loads in flight vs zmm 4-acc verify; amx_verify = tile load + zmm check",
                 setup: Some(Box::new(w(tmr::k_fill_tmr_256))), prime: Prime::Flush,
                 expect_zero: true, bytes_mult: 1.0, variants: vs });
 
-            let mut vs = vec![v!("amx", move |b| { tiles::k_amx_fill(amx, b); 0 })];
+            let mut vs = vec![v!("amx", move |b| {
+                tiles::k_amx_fill(amx, b);
+                0
+            })];
             push_if(&mut vs, tmr512, v!("zmm_tmr_512", w(tmr::k_fill_tmr_512)));
-            gs.push(Group { id: "amxfill", title: "AMX pattern fill (1 KiB tile stores) vs zmm fill",
-                setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+            gs.push(Group {
+                id: "amxfill",
+                title: "AMX pattern fill (1 KiB tile stores) vs zmm fill",
+                setup: None,
+                prime: Prime::None,
+                expect_zero: false,
+                bytes_mult: 1.0,
+                variants: vs,
+            });
 
-            let mut vs = vec![v!("amx", move |b| { let (d, s) = split(b); tiles::k_amx_copy(amx, d, s); 0 })];
+            let mut vs = vec![v!("amx", move |b| {
+                let (d, s) = split(b);
+                tiles::k_amx_copy(amx, d, s);
+                0
+            })];
             if tmr512 {
                 vs.push(v!("nt_tmr_512", |b| {
                     let (d, s) = split(b);
@@ -472,23 +739,44 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
                     0
                 }));
             }
-            gs.push(Group { id: "amxcopy", title: "copy half -> half: AMX tiles vs NT-512 vs MOVDIR64B (GiB/s copied)",
-                setup: None, prime: Prime::Flush, expect_zero: false, bytes_mult: 0.5, variants: vs });
+            gs.push(Group {
+                id: "amxcopy",
+                title: "copy half -> half: AMX tiles vs NT-512 vs MOVDIR64B (GiB/s copied)",
+                setup: None,
+                prime: Prime::Flush,
+                expect_zero: false,
+                bytes_mult: 0.5,
+                variants: vs,
+            });
 
             let mut vs = vec![v!("amx", move |b| tiles::k_amx_strided_read(amx, b))];
-            push_if(&mut vs, tmr512, v!("zmm_512", r(tiles::k_amx_strided_read_zmm_512)));
+            push_if(
+                &mut vs,
+                tmr512,
+                v!("zmm_512", r(tiles::k_amx_strided_read_zmm_512)),
+            );
             gs.push(Group { id: "amxstride",
                 title: "strided read, stride 4096 (one line in each of 16 pages): 1 tile load vs 16 zmm loads",
                 setup: None, prime: Prime::Flush, expect_zero: false, bytes_mult: 1.0, variants: vs });
         }
     }
-    gs.push(port_group("sbnf", "TMR StuckBit port, no flush (3 phases)", t, 6.0));
+    gs.push(port_group(
+        "sbnf",
+        "TMR StuckBit port, no flush (3 phases)",
+        t,
+        6.0,
+    ));
     gs
 }
 
 /// The ported-TMR-test groups (TMR style vs plumb style at 256/512). They return error counts,
 /// which must be 0 on clean memory.
-fn port_group<'a>(id: &'static str, title: &'static str, t: &'a Toks, bytes_mult: f64) -> Group<'a> {
+fn port_group<'a>(
+    id: &'static str,
+    title: &'static str,
+    t: &'a Toks,
+    bytes_mult: f64,
+) -> Group<'a> {
     let (t2, t512, tmr512, pcf) = (t.t2, t.t512, t.tmr512, t.pcf);
     let mut vs: Vec<Variant<'a>> = Vec::new();
     match id {
@@ -534,7 +822,15 @@ fn port_group<'a>(id: &'static str, title: &'static str, t: &'a Toks, bytes_mult
         }
         _ => unreachable!("unknown port group {id}"),
     }
-    Group { id, title, setup: None, prime: Prime::None, expect_zero: true, bytes_mult, variants: vs }
+    Group {
+        id,
+        title,
+        setup: None,
+        prime: Prime::None,
+        expect_zero: true,
+        bytes_mult,
+        variants: vs,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -551,7 +847,11 @@ fn gib_s(bytes: f64, secs: f64) -> f64 {
 /// Median/min/max of throughputs (already in GiB/s).
 fn stat(mut xs: Vec<f64>) -> Stat {
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    Stat { med: xs[xs.len() / 2], min: xs[0], max: xs[xs.len() - 1] }
+    Stat {
+        med: xs[xs.len() / 2],
+        min: xs[0],
+        max: xs[xs.len() - 1],
+    }
 }
 
 fn prime_buf(p: Prime, buf: &mut [u64]) {
@@ -572,7 +872,10 @@ fn warm_and_check(g: &Group, buf: &mut [u64], bad: &AtomicBool) {
     for v in &g.variants {
         let res = (v.run)(black_box(&mut *buf));
         if g.expect_zero && res != 0 {
-            eprintln!("  !! {} reported a mismatch on clean data: port bug, numbers invalid", v.name);
+            eprintln!(
+                "  !! {} reported a mismatch on clean data: port bug, numbers invalid",
+                v.name
+            );
             bad.store(true, Ordering::Relaxed);
         }
     }
@@ -632,17 +935,22 @@ fn run_mt(g: &Group, regions: &[Region], order: &[usize], t: usize, samples: usi
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("worker panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("worker panicked"))
+            .collect()
     });
     let bytes = (regions[0].bytes() as f64) * g.bytes_mult * t as f64;
     (0..nv)
         .map(|vi| {
-            stat((0..samples)
-                .map(|smp| {
-                    let wall = per_thread.iter().map(|th| th[vi][smp]).fold(0.0, f64::max);
-                    gib_s(bytes, wall)
-                })
-                .collect())
+            stat(
+                (0..samples)
+                    .map(|smp| {
+                        let wall = per_thread.iter().map(|th| th[vi][smp]).fold(0.0, f64::max);
+                        gib_s(bytes, wall)
+                    })
+                    .collect(),
+            )
         })
         .collect()
 }
@@ -662,7 +970,9 @@ fn baseline_of(name: &str, names: &[&str]) -> Option<usize> {
             }
         }
         "auto" => {
-            return names.iter().position(|n| *n == "tmr_512")
+            return names
+                .iter()
+                .position(|n| *n == "tmr_512")
                 .or_else(|| names.iter().position(|n| *n == "tmr_256"));
         }
         _ if name.starts_with("md_") => "md_tmr".to_string(),
@@ -674,7 +984,12 @@ fn baseline_of(name: &str, names: &[&str]) -> Option<usize> {
 /// Allocate one region per worker, each from a thread pinned to that worker's CPU (so a
 /// multi-node box would place it locally). 1 GiB pages first, then 2 MiB; never 4 KiB unless
 /// asked for, and never a silent fallback: the page mix is printed.
-fn alloc_regions(n: usize, bytes: usize, want: Pages, order: &[usize]) -> Result<Vec<Region>, String> {
+fn alloc_regions(
+    n: usize,
+    bytes: usize,
+    want: Pages,
+    order: &[usize],
+) -> Result<Vec<Region>, String> {
     std::thread::scope(|s| {
         let hs: Vec<_> = (0..n)
             .map(|k| {
@@ -694,14 +1009,18 @@ fn alloc_regions(n: usize, bytes: usize, want: Pages, order: &[usize]) -> Result
                         }
                     }
                     Err(match last {
-                        1450 => format!("region {k}: no contiguous physical memory for large pages (1450)"),
+                        1450 => format!(
+                            "region {k}: no contiguous physical memory for large pages (1450)"
+                        ),
                         1314 => format!("region {k}: SeLockMemoryPrivilege not held (1314)"),
                         e => format!("region {k}: VirtualAlloc2 failed ({e})"),
                     })
                 })
             })
             .collect();
-        hs.into_iter().map(|h| h.join().expect("alloc thread panicked")).collect()
+        hs.into_iter()
+            .map(|h| h.join().expect("alloc thread panicked"))
+            .collect()
     })
 }
 
@@ -714,10 +1033,14 @@ fn main() {
     }
     let level = Level::new();
     let toks = Toks {
-        t2: level.as_avx2().expect("AVX2 detected but fearless_simd found no Avx2 level"),
+        t2: level
+            .as_avx2()
+            .expect("AVX2 detected but fearless_simd found no Avx2 level"),
         t512: level.as_avx512(),
-        tmr512: cpu.avx512f && is_x86_feature_detected!("avx512bw")
-            && is_x86_feature_detected!("avx512cd") && is_x86_feature_detected!("avx512dq")
+        tmr512: cpu.avx512f
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512cd")
+            && is_x86_feature_detected!("avx512dq")
             && is_x86_feature_detected!("avx512vl"),
         level,
         cpu,
@@ -729,74 +1052,142 @@ fn main() {
     let order = mem::cpu_order();
 
     println!("fearless-test (TODO 84): TMR-style macro_rules!/std::simd vs fearless_simd 1.0");
-    println!("cpu: avx2={} avx512f={} clflushopt={} movdir64b={} | amx tile={} int8={} bf16={} os_xtile={}",
-        cpu.avx2, cpu.avx512f, cpu.clflushopt, cpu.movdir64b, cpu.amx_tile, cpu.amx_int8,
-        cpu.amx_bf16, cpu.os_amx);
-    println!("fearless_simd Level::new() = {:?}  (TMR-style 512: {}, fs Avx512 token: {})",
-        level, toks.tmr512, toks.t512.is_some());
-    println!("topology: {} logical / {} physical, pin order {:?}", order.len(), mem::physical_cores(), order);
+    println!(
+        "cpu: avx2={} avx512f={} clflushopt={} movdir64b={} | amx tile={} int8={} bf16={} os_xtile={}",
+        cpu.avx2,
+        cpu.avx512f,
+        cpu.clflushopt,
+        cpu.movdir64b,
+        cpu.amx_tile,
+        cpu.amx_int8,
+        cpu.amx_bf16,
+        cpu.os_amx
+    );
+    println!(
+        "fearless_simd Level::new() = {:?}  (TMR-style 512: {}, fs Avx512 token: {})",
+        level,
+        toks.tmr512,
+        toks.t512.is_some()
+    );
+    println!(
+        "topology: {} logical / {} physical, pin order {:?}",
+        order.len(),
+        mem::physical_cores(),
+        order
+    );
     if toks.tmr512 && toks.t512.is_none() {
         println!("note: AVX-512F present but not the Ice Lake set; fs_512 rows are skipped");
     }
 
     let mut csv = std::fs::File::create(&o.csv).expect("create csv");
-    writeln!(csv, "regime,group,variant,threads,pages,median_gib_s,min_gib_s,max_gib_s,samples").unwrap();
+    writeln!(
+        csv,
+        "regime,group,variant,threads,pages,median_gib_s,min_gib_s,max_gib_s,samples"
+    )
+    .unwrap();
 
     for &regime in &o.regimes {
         match regime {
             Regime::L2 => {
                 pin_to_cpu(o.cpu);
-                println!("\n######## L2 regime: 1 thread on CPU {}, 256 KiB warm, median GiB/s [min..max]",
-                    o.cpu);
+                println!(
+                    "\n######## L2 regime: 1 thread on CPU {}, 256 KiB warm, median GiB/s [min..max]",
+                    o.cpu
+                );
                 let mut buf = AlignedBuf::new(256 << 10);
                 for g in groups(&toks, regime) {
-                    if g.variants.is_empty() || o.only.as_ref().is_some_and(|ids| !ids.iter().any(|x| x == g.id)) {
+                    if g.variants.is_empty()
+                        || o.only
+                            .as_ref()
+                            .is_some_and(|ids| !ids.iter().any(|x| x == g.id))
+                    {
                         continue;
                     }
                     let primed = g.prime != Prime::None;
-                    let (reps, samples) = if primed { (1, o.l2_samples * 10) } else { (o.l2_reps, o.l2_samples) };
-                    println!("\n== {} | {} ({} samples x {} reps)", g.id, g.title, samples, reps);
+                    let (reps, samples) = if primed {
+                        (1, o.l2_samples * 10)
+                    } else {
+                        (o.l2_reps, o.l2_samples)
+                    };
+                    println!(
+                        "\n== {} | {} ({} samples x {} reps)",
+                        g.id, g.title, samples, reps
+                    );
                     let stats = run_l2(&g, buf.as_mut_slice(), reps, samples);
                     let names: Vec<&str> = g.variants.iter().map(|v| v.name).collect();
-                    println!("   {:<14} {:>9}   {:>19}   {:>7}", "variant", "median", "[min .. max]", "vs tmr");
+                    println!(
+                        "   {:<14} {:>9}   {:>19}   {:>7}",
+                        "variant", "median", "[min .. max]", "vs tmr"
+                    );
                     for (k, s) in stats.iter().enumerate() {
                         let rel = baseline_of(names[k], &names)
                             .map(|b| format!("{:>6.1}%", 100.0 * s.med / stats[b].med))
                             .unwrap_or_default();
-                        println!("   {:<14} {:>9.2}   [{:>7.2} .. {:>7.2}]   {}", names[k], s.med, s.min, s.max, rel);
-                        writeln!(csv, "l2,{},{},1,4 KiB,{:.3},{:.3},{:.3},{}", g.id, names[k], s.med, s.min, s.max, samples).unwrap();
+                        println!(
+                            "   {:<14} {:>9.2}   [{:>7.2} .. {:>7.2}]   {}",
+                            names[k], s.med, s.min, s.max, rel
+                        );
+                        writeln!(
+                            csv,
+                            "l2,{},{},1,4 KiB,{:.3},{:.3},{:.3},{}",
+                            g.id, names[k], s.med, s.min, s.max, samples
+                        )
+                        .unwrap();
                     }
                 }
             }
             Regime::Dram => {
-                let threads: Vec<usize> = o.threads.iter().copied().filter(|&t| t >= 1 && t <= order.len()).collect();
+                let threads: Vec<usize> = o
+                    .threads
+                    .iter()
+                    .copied()
+                    .filter(|&t| t >= 1 && t <= order.len())
+                    .collect();
                 let tmax = *threads.iter().max().unwrap_or(&1);
                 let bytes = o.per_thread_mib << 20;
                 if o.pages != Pages::Small
                     && let Err(e) = mem::enable_lock_memory_privilege()
                 {
-                    eprintln!("large pages unavailable: {e}\n(use --pages small to run on 4 KiB pages)");
+                    eprintln!(
+                        "large pages unavailable: {e}\n(use --pages small to run on 4 KiB pages)"
+                    );
                     std::process::exit(1);
                 }
                 let regions = match alloc_regions(tmax, bytes, o.pages, &order) {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("allocation failed: {e}\n(try --per-thread-mib smaller, or --pages large)");
+                        eprintln!(
+                            "allocation failed: {e}\n(try --per-thread-mib smaller, or --pages large)"
+                        );
                         std::process::exit(1);
                     }
                 };
                 let mix: Vec<&str> = regions.iter().map(|r| r.pages.label()).collect();
-                let pages = if mix.iter().all(|m| *m == mix[0]) { mix[0].to_string() } else { format!("mixed {mix:?}") };
-                println!("\n######## DRAM regime: {} MiB/thread on {} pages, threads {:?}, aggregate GiB/s \
-                    (bytes / slowest thread), median of {}", o.per_thread_mib, pages, threads, o.samples);
+                let pages = if mix.iter().all(|m| *m == mix[0]) {
+                    mix[0].to_string()
+                } else {
+                    format!("mixed {mix:?}")
+                };
+                println!(
+                    "\n######## DRAM regime: {} MiB/thread on {} pages, threads {:?}, aggregate GiB/s \
+                    (bytes / slowest thread), median of {}",
+                    o.per_thread_mib, pages, threads, o.samples
+                );
                 for g in groups(&toks, regime) {
-                    if g.variants.is_empty() || o.only.as_ref().is_some_and(|ids| !ids.iter().any(|x| x == g.id)) {
+                    if g.variants.is_empty()
+                        || o.only
+                            .as_ref()
+                            .is_some_and(|ids| !ids.iter().any(|x| x == g.id))
+                    {
                         continue;
                     }
                     println!("\n== {} | {}", g.id, g.title);
                     let names: Vec<&str> = g.variants.iter().map(|v| v.name).collect();
                     let t_start = Instant::now();
-                    let per_t: Vec<Vec<Stat>> = threads.iter().map(|&t| run_mt(&g, &regions, &order, t, o.samples)).collect();
+                    let per_t: Vec<Vec<Stat>> = threads
+                        .iter()
+                        .map(|&t| run_mt(&g, &regions, &order, t, o.samples))
+                        .collect();
                     let mut hdr = format!("   {:<12}", "variant");
                     for t in &threads {
                         hdr += &format!(" {:>13}", format!("{t}T"));
@@ -817,14 +1208,24 @@ fn main() {
                             if spread > worst.0 {
                                 worst = (spread, name, t);
                             }
-                            writeln!(csv, "dram,{},{},{},{},{:.3},{:.3},{:.3},{}", g.id, name, t, pages, s.med, s.min, s.max, o.samples).unwrap();
+                            writeln!(
+                                csv,
+                                "dram,{},{},{},{},{:.3},{:.3},{:.3},{}",
+                                g.id, name, t, pages, s.med, s.min, s.max, o.samples
+                            )
+                            .unwrap();
                         }
                         println!("{line}");
                     }
                     spreads.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    println!("   spread (max-min)/median: typical {:.1}%, worst {:.1}% ({} @ {}T); group took {:.0} s",
-                        100.0 * spreads[spreads.len() / 2], 100.0 * worst.0, worst.1, worst.2,
-                        t_start.elapsed().as_secs_f64());
+                    println!(
+                        "   spread (max-min)/median: typical {:.1}%, worst {:.1}% ({} @ {}T); group took {:.0} s",
+                        100.0 * spreads[spreads.len() / 2],
+                        100.0 * worst.0,
+                        worst.1,
+                        worst.2,
+                        t_start.elapsed().as_secs_f64()
+                    );
                 }
                 drop(regions);
             }

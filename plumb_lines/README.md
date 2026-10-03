@@ -60,4 +60,35 @@ flushes and exports `with_clflushopt!`, which builds a fearless kernel entry poi
 `clflushopt` added to the level's target features, so the intrinsic also inlines inside fearless
 loops. MOVDIR64B has no stdarch intrinsic yet, so it's always `asm!`.
 
-x86_64 only. Licensed under MIT or Apache-2.0.
+## Minimum supported Rust Version (MSRV)
+
+This version of plumb_lines has been verified to compile with **Rust 1.89** and later, the same MSRV
+as fearless_simd 1.0. The `nightly` feature needs a nightly
+toolchain. x86_64 only.
+
+Future versions might increase the Rust version requirement. This will be accompanied by a minor
+version bump.
+
+## Community
+
+Discussion happens in the [Linebender Zulip](https://xi.zulipchat.com/), in
+[#simd](https://xi.zulipchat.com/#narrow/channel/514230-simd), where fearless_simd is discussed.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](../LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](../LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+## Contribution
+
+Contributions are welcome by pull request. The [Rust code of conduct] applies.
+Please feel free to add your name to the [AUTHORS] file in any substantive pull request.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be licensed as above, without any additional terms or conditions.
+
+[Rust code of conduct]: https://www.rust-lang.org/policies/code-of-conduct
+[AUTHORS]: ../AUTHORS

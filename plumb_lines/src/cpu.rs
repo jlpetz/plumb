@@ -1,12 +1,18 @@
-//! CPUID helpers for the capability tokens. std_detect knows `clflushopt` but not
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! CPUID helpers for the capability tokens. `std_detect` knows `clflushopt` but not
 //! `movdir64b`, and this crate is `no_std`, so detection reads CPUID directly.
 
-use core::arch::x86_64::{CpuidResult, __cpuid, __cpuid_count};
+use core::arch::x86_64::{__cpuid, __cpuid_count, CpuidResult};
 
 #[inline]
 fn cpuid(leaf: u32, sub: u32) -> CpuidResult {
-    // SAFETY: CPUID is available on every x86_64 CPU. (It's a safe fn on recent toolchains.)
-    #[allow(unused_unsafe)]
+    // SAFETY: CPUID is available on every x86_64 CPU.
+    #[allow(
+        unused_unsafe,
+        reason = "`__cpuid_count` is unsafe on the 1.89 MSRV, safe on newer toolchains"
+    )]
     unsafe {
         __cpuid_count(leaf, sub)
     }
@@ -15,7 +21,10 @@ fn cpuid(leaf: u32, sub: u32) -> CpuidResult {
 #[inline]
 fn max_leaf() -> u32 {
     // SAFETY: as above.
-    #[allow(unused_unsafe)]
+    #[allow(
+        unused_unsafe,
+        reason = "`__cpuid` is unsafe on the 1.89 MSRV, safe on newer toolchains"
+    )]
     unsafe {
         __cpuid(0).eax
     }
@@ -36,5 +45,9 @@ pub fn has_movdir64b() -> bool {
 /// so anything that isn't a power of two in 32..=4096 (0, or an odd hypervisor value) becomes 64.
 pub fn flush_line_bytes() -> usize {
     let bytes = ((cpuid(1, 0).ebx >> 8) & 0xff) as usize * 8;
-    if bytes.is_power_of_two() && (32..=4096).contains(&bytes) { bytes } else { 64 }
+    if bytes.is_power_of_two() && (32..=4096).contains(&bytes) {
+        bytes
+    } else {
+        64
+    }
 }

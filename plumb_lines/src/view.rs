@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Aligned vector views of element slices.
 //!
 //! [`as_vectors_mut`] splits `&mut [u64]` into `(head, &mut [V], tail)`, where `V` is a fearless
@@ -45,7 +48,10 @@ fn head_len<S: Simd, V: SimdBase<S>>(addr: usize, len: usize) -> usize {
 /// Splits `buf` into `(head, vectors, tail)`; see the [module docs](self). Takes the token
 /// because every `V` value carries one: a `u64x8<Avx512>` is a proof that AVX-512 is present.
 #[inline(always)]
-pub fn as_vectors<S: Simd, V: SimdBase<S>>(simd: S, buf: &[V::Element]) -> (&[V::Element], &[V], &[V::Element]) {
+pub fn as_vectors<S: Simd, V: SimdBase<S>>(
+    simd: S,
+    buf: &[V::Element],
+) -> (&[V::Element], &[V], &[V::Element]) {
     let () = Layout::<S, V>::OK;
     let _ = simd;
     let len = buf.len();

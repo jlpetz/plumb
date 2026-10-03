@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The same kernels written with fearless_simd: **one generic body per kernel**, the width
 //! chosen by the vector type `V` (`u64x2/u64x4/u64x8<S>`) and the instruction set by the token
 //! `S` (`Avx2`, `Avx512`). No per-width macro, no `#[target_feature]`, slices instead of raw
@@ -179,7 +182,11 @@ pub fn nt_pos_write<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(
     base: u64,
 ) {
     let w = V::LEN;
-    assert_eq!(buf.as_ptr() as usize % size_of::<V>(), 0, "NT stores need vector alignment");
+    assert_eq!(
+        buf.as_ptr() as usize % size_of::<V>(),
+        0,
+        "NT stores need vector alignment"
+    );
     assert_eq!(buf.len() % w, 0);
     let base_v = V::splat(simd, base);
     let step1 = V::splat(simd, w as u64);
@@ -220,7 +227,11 @@ pub fn nt_pos_write<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(
 kernel!(
     /// The same NT write as a plain `kernel!` (no trait): the "drop to intrinsics" route.
     pub fn nt_pos_write_k512(t: Avx512, buf: &mut [u64], base: u64) {
-        assert_eq!(buf.as_ptr() as usize % 64, 0, "NT stores need 64-byte alignment");
+        assert_eq!(
+            buf.as_ptr() as usize % 64,
+            0,
+            "NT stores need 64-byte alignment"
+        );
         let base_v = u64x8::splat(t, base);
         let step = u64x8::splat(t, 8);
         let mut idx = u64x8::from_fn(t, |i| i as u64);
@@ -253,7 +264,11 @@ pub fn copy_nt<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(
     src: &[u64],
 ) {
     assert_eq!(dst.len(), src.len());
-    assert_eq!(dst.as_ptr() as usize % size_of::<V>(), 0, "NT stores need vector alignment");
+    assert_eq!(
+        dst.as_ptr() as usize % size_of::<V>(),
+        0,
+        "NT stores need vector alignment"
+    );
     let d = dst.as_mut_ptr();
     for (i, c) in src.chunks_exact(V::LEN).enumerate() {
         // SAFETY: i * LEN + LEN <= dst.len(), aligned (asserted), sfence below.
@@ -330,7 +345,11 @@ pub fn wflush_asm<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &mut [u64
 kernel!(
     pub fn copy_movdir(t: Avx2, dst: &mut [u64], src: &[u64]) {
         assert_eq!(dst.len(), src.len());
-        assert_eq!(dst.as_ptr() as usize % 64, 0, "MOVDIR64B needs a 64-byte aligned dst");
+        assert_eq!(
+            dst.as_ptr() as usize % 64,
+            0,
+            "MOVDIR64B needs a 64-byte aligned dst"
+        );
         let d = dst.as_mut_ptr();
         for (i, line) in src.as_chunks::<{ LINE / 8 }>().0.iter().enumerate() {
             // SAFETY: both lines in bounds; dst aligned (asserted); sfence below. The caller
@@ -354,7 +373,11 @@ fn or_xor_step<S: Simd, V: SimdInt<S, Element = u64>>(a: V, x: V, p: V) -> V {
 }
 
 #[simd]
-pub fn verify4_helper<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &[u64], pat: u64) -> u64 {
+pub fn verify4_helper<S: Simd, V: SimdInt<S, Element = u64>>(
+    simd: S,
+    buf: &[u64],
+    pat: u64,
+) -> u64 {
     let w = V::LEN;
     let p = V::splat(simd, pat);
     let z = V::splat(simd, 0);
@@ -525,7 +548,11 @@ entry!(k_verify4_fsptr_512, Avx512, u64x8, verify4_ptr, (buf: &[u64]) -> u64, (b
 
 /// Prefetching verify with the raw-pointer walk (see `verify4_ptr`).
 #[simd]
-pub fn verify4_pf_ptr<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &[u64], pat: u64) -> u64 {
+pub fn verify4_pf_ptr<S: Simd, V: SimdInt<S, Element = u64>>(
+    simd: S,
+    buf: &[u64],
+    pat: u64,
+) -> u64 {
     let w = V::LEN;
     let lines = (4 * size_of::<V>() / LINE).max(1);
     let p = V::splat(simd, pat);

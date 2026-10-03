@@ -23,3 +23,6 @@ default = []
 # `clflushopt_target_feature`, rust-lang/rust#157096) instead of `asm!`, and export the
 # `with_clflushopt!` entry macro. Nightly only. Both paths emit the same instruction.
 nightly = []
+
+[lints]
+workspace = true

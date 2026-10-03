@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The tile session ([`Amx::with_tiles`]) and the operations it unlocks ([`Tiles`]).
 //!
 //! Every tile instruction is an `asm!` block. None of them is `pure`: the tile registers are
@@ -23,11 +26,15 @@ struct TileConfig([u8; 64]);
 
 static CONFIG: TileConfig = TileConfig(palette1_all_16x64());
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "ROWS (16) and ROW_BYTES (64) fit the descriptor's byte fields"
+)]
 const fn palette1_all_16x64() -> [u8; 64] {
     // Byte 0 palette id, byte 1 start_row (0: no interrupted load to resume), bytes 2..16
     // reserved; colsb[16] as u16 LE at 16..48 and rows[16] at 48..64. Only tiles 0..7 exist,
     // and palette 1 requires the fields of the others to stay zero.
-    let mut b = [0u8; 64];
+    let mut b = [0_u8; 64];
     b[0] = 1;
     let mut t = 0;
     while t < 8 {
@@ -112,7 +119,7 @@ impl Session {
             asm!("ldtilecfg [{cfg}]", cfg = in(reg) CONFIG.0.as_ptr(),
                  options(nostack, readonly, preserves_flags));
         }
-        Session {
+        Self {
             _per_thread: PhantomData,
         }
     }

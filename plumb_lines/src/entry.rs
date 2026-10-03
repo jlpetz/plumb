@@ -1,20 +1,23 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `with_clflushopt!` (nightly): a fearless kernel entry point whose target features are the
 //! level's plus `clflushopt`, so `_mm_clflushopt` inlines inside fearless loops.
 //!
-//! fearless_simd's tokens can't carry CLFLUSHOPT (it isn't in any x86-64 level, and `kernel!`
+//! `fearless_simd`'s tokens can't carry CLFLUSHOPT (it isn't in any x86-64 level, and `kernel!`
 //! only enables its six audited feature lists). Called from a fearless kernel, the intrinsic is
 //! therefore an out-of-line call per line. This macro emits an entry fn whose
-//! `#[target_feature]` is fearless_simd 1.0.0's exact list for the level plus `clflushopt`,
+//! `#[target_feature]` is `fearless_simd` 1.0.0's exact list for the level plus `clflushopt`,
 //! around a generic `#[inline(always)]` body. Inside it both fearless's ops and the intrinsic
 //! inline (TODO 84: the same 8x-unrolled loop as TMR's `flush_range_to_dram`).
 //!
-//! **Coupling**: the feature lists are copied from fearless_simd 1.0.0 (pinned with `=` in the
+//! **Coupling**: the feature lists are copied from `fearless_simd` 1.0.0 (pinned with `=` in the
 //! workspace). Enabling a feature its token doesn't prove would be unsound, so the lists are
 //! exported as [`AVX2_FEATURES`]/[`AVX512_FEATURES`] and a test checks them against the CPU and
-//! against the macro text. Re-check on every fearless_simd upgrade. The language-level fix is
+//! against the macro text. Re-check on every `fearless_simd` upgrade. The language-level fix is
 //! struct target features (rust-lang/rfcs#3525).
 //!
-//! The token types are named through `$crate` (plumb_lines' own fearless_simd), so a call site
+//! The token types are named through `$crate` (`plumb_lines`' own `fearless_simd`), so a call site
 //! that shadows `fearless_simd` can't pass a forged token, and the token is always the one the
 //! copied feature lists belong to.
 //!
@@ -48,7 +51,7 @@
 //! assert!(lines.iter().all(|l| *l == Line([7; 8])));
 //! ```
 
-/// A token from anywhere but plumb_lines' own fearless_simd is rejected:
+/// A token from anywhere but `plumb_lines`' own `fearless_simd` is rejected:
 ///
 /// ```compile_fail
 /// #![feature(clflushopt_target_feature)]
@@ -63,9 +66,10 @@
 /// ```
 pub const _FORGED_TOKEN_IS_REJECTED: () = ();
 
-/// fearless_simd 1.0.0's `Avx2` target features plus `clflushopt` (must equal the macro text).
-pub const AVX2_FEATURES: &str = "fxsr,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,lzcnt,movbe,popcnt,xsave,clflushopt";
-/// fearless_simd 1.0.0's `Avx512` target features plus `clflushopt` (must equal the macro text).
+/// `fearless_simd` 1.0.0's `Avx2` target features plus `clflushopt` (must equal the macro text).
+pub const AVX2_FEATURES: &str =
+    "fxsr,avx2,bmi1,bmi2,cmpxchg16b,f16c,fma,lzcnt,movbe,popcnt,xsave,clflushopt";
+/// `fearless_simd` 1.0.0's `Avx512` target features plus `clflushopt` (must equal the macro text).
 pub const AVX512_FEATURES: &str = "fxsr,adx,aes,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,cmpxchg16b,fma,gfni,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,vaes,vpclmulqdq,xsave,xsavec,xsaveopt,xsaves,clflushopt";
 
 /// Build a fearless kernel entry point with `clflushopt` added to the level's target features.

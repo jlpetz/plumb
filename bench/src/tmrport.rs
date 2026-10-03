@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Ports of three TMR-APP tests, each written twice:
 //!
 //! - **TMR style** (`*_tmr_*`): the per-chunk hot loops of `stuck_bit_impl!` /
@@ -55,7 +58,12 @@ macro_rules! tmr_ports {
         /// `p..p+n` valid and 64-byte aligned; the CPU has the features in `$tf` and CLFLUSHOPT.
         #[inline(never)]
         #[target_feature(enable = $tf)]
-        pub unsafe fn $sb<F: FnMut(&mut [u64])>(p: *mut u64, n: usize, flush: bool, mut inject: F) -> u64 {
+        pub unsafe fn $sb<F: FnMut(&mut [u64])>(
+            p: *mut u64,
+            n: usize,
+            flush: bool,
+            mut inject: F,
+        ) -> u64 {
             let lanes = size_of::<$V>() / 8;
             let base = p as *mut $V;
             let len = n / lanes;
@@ -71,9 +79,15 @@ macro_rules! tmr_ports {
                     }
                     fence(Ordering::SeqCst);
                     if flush {
-                        crate::tmr::k_flush_tmr(base.add(start) as *const u64, (end - start) * lanes);
+                        crate::tmr::k_flush_tmr(
+                            base.add(start) as *const u64,
+                            (end - start) * lanes,
+                        );
                     }
-                    inject(std::slice::from_raw_parts_mut(base.add(start) as *mut u64, (end - start) * lanes));
+                    inject(std::slice::from_raw_parts_mut(
+                        base.add(start) as *mut u64,
+                        (end - start) * lanes,
+                    ));
                     let mut a0 = <$V>::splat(0);
                     let mut a1 = <$V>::splat(0);
                     let mut a2 = <$V>::splat(0);
@@ -106,7 +120,12 @@ macro_rules! tmr_ports {
         /// As above.
         #[inline(never)]
         #[target_feature(enable = $tf)]
-        pub unsafe fn $refresh<F: FnMut(&mut [u64])>(p: *mut u64, n: usize, flush: bool, mut inject: F) -> u64 {
+        pub unsafe fn $refresh<F: FnMut(&mut [u64])>(
+            p: *mut u64,
+            n: usize,
+            flush: bool,
+            mut inject: F,
+        ) -> u64 {
             let lanes = size_of::<$V>() / 8;
             let base = p as *mut $V;
             let len = n / lanes;
@@ -123,7 +142,10 @@ macro_rules! tmr_ports {
                     crate::tmr::k_flush_tmr(base.add(start) as *const u64, (end - start) * lanes);
                 }
                 fence(Ordering::SeqCst);
-                inject(std::slice::from_raw_parts_mut(base.add(start) as *mut u64, (end - start) * lanes));
+                inject(std::slice::from_raw_parts_mut(
+                    base.add(start) as *mut u64,
+                    (end - start) * lanes,
+                ));
                 let mut a0 = <$V>::splat(0);
                 let mut a1 = <$V>::splat(0);
                 let mut a2 = <$V>::splat(0);
@@ -185,15 +207,27 @@ macro_rules! tmr_ports {
                         let idx3 = idx2 + step1;
                         let v3: $V = idx3 ^ base_vec;
                         $stream(p.add(i) as *mut $arch, std::mem::transmute::<$V, $arch>(v0));
-                        $stream(p.add(i + w) as *mut $arch, std::mem::transmute::<$V, $arch>(v1));
-                        $stream(p.add(i + w * 2) as *mut $arch, std::mem::transmute::<$V, $arch>(v2));
-                        $stream(p.add(i + w * 3) as *mut $arch, std::mem::transmute::<$V, $arch>(v3));
+                        $stream(
+                            p.add(i + w) as *mut $arch,
+                            std::mem::transmute::<$V, $arch>(v1),
+                        );
+                        $stream(
+                            p.add(i + w * 2) as *mut $arch,
+                            std::mem::transmute::<$V, $arch>(v2),
+                        );
+                        $stream(
+                            p.add(i + w * 3) as *mut $arch,
+                            std::mem::transmute::<$V, $arch>(v3),
+                        );
                         idx_vec += step4;
                         i += w * 4;
                     }
                     while i < ce {
                         let val: $V = idx_vec ^ base_vec;
-                        $stream(p.add(i) as *mut $arch, std::mem::transmute::<$V, $arch>(val));
+                        $stream(
+                            p.add(i) as *mut $arch,
+                            std::mem::transmute::<$V, $arch>(val),
+                        );
                         idx_vec += step1;
                         i += w;
                     }
@@ -221,10 +255,26 @@ macro_rules! tmr_ports {
     };
 }
 
-tmr_ports!(std::simd::u64x4, "avx2,avx,fma,bmi1,bmi2",
-    sb_tmr_256, refresh_tmr_256, simplent_tmr_256, [0u64, 1, 2, 3], __m256i, _mm256_stream_si256);
-tmr_ports!(std::simd::u64x8, "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2",
-    sb_tmr_512, refresh_tmr_512, simplent_tmr_512, [0u64, 1, 2, 3, 4, 5, 6, 7], __m512i, _mm512_stream_si512);
+tmr_ports!(
+    std::simd::u64x4,
+    "avx2,avx,fma,bmi1,bmi2",
+    sb_tmr_256,
+    refresh_tmr_256,
+    simplent_tmr_256,
+    [0u64, 1, 2, 3],
+    __m256i,
+    _mm256_stream_si256
+);
+tmr_ports!(
+    std::simd::u64x8,
+    "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2",
+    sb_tmr_512,
+    refresh_tmr_512,
+    simplent_tmr_512,
+    [0u64, 1, 2, 3, 4, 5, 6, 7],
+    __m512i,
+    _mm512_stream_si512
+);
 
 // ---------------------------------------------------------------------------------------------
 // plumb style: one generic body per test

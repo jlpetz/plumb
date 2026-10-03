@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! The session: configuration, release (also on unwind), nesting, and per-thread state.
 
 use std::time::Duration;
@@ -9,12 +12,12 @@ use crate::{Lcg, amx_or_skip, expected_config, panic_message, tile_config};
 /// A load/store round trip in a fresh session: proves the thread can use tiles again.
 fn round_trip(amx: Amx, seed: u64) {
     let src = Lcg::new(seed).bytes(TILE_BYTES);
-    let mut dst = vec![0u8; TILE_BYTES];
+    let mut dst = vec![0_u8; TILE_BYTES];
     amx.with_tiles(|t| {
         t.load::<T3>(&src, ROW_BYTES);
         t.store::<T3>(&mut dst, ROW_BYTES);
     });
-    assert_eq!(src, dst);
+    assert_eq!(src, dst, "seed {seed}: the tile must round-trip");
 }
 
 #[test]
@@ -39,8 +42,8 @@ fn every_session_starts_with_zeroed_tiles() {
     };
     // Every tile non-zero in the first session, so the second one's zeros prove the reset for
     // all eight (a fresh thread's tiles start zeroed anyway).
-    let ones = vec![0xFFu8; TILE_BYTES];
-    let mut out = vec![0xEEu8; 8 * TILE_BYTES];
+    let ones = vec![0xFF_u8; TILE_BYTES];
+    let mut out = vec![0xEE_u8; 8 * TILE_BYTES];
     macro_rules! each {
         ($t:ident, $op:ident, $buf:expr) => {
             each!($t, $op, $buf, T0 = 0, T1 = 1, T2 = 2, T3 = 3, T4 = 4, T5 = 5, T6 = 6, T7 = 7)
@@ -76,9 +79,9 @@ fn with_tiles_returns_the_closure_result() {
     let Some(amx) = amx_or_skip("with_tiles_returns_the_closure_result") else {
         return;
     };
-    let src = vec![0x11u8; TILE_BYTES];
+    let src = vec![0x11_u8; TILE_BYTES];
     let v = amx.with_tiles(|t| {
-        let mut row = [0u8; 2 * ROW_BYTES];
+        let mut row = [0_u8; 2 * ROW_BYTES];
         t.load::<T0>(&src, ROW_BYTES);
         t.store::<T0>(&mut row, 0); // stride 0: all 16 rows into the first 64 bytes
         row
@@ -114,7 +117,7 @@ fn caught_nested_panic_leaves_the_outer_session_intact() {
         return;
     };
     let src = Lcg::new(2).bytes(TILE_BYTES);
-    let mut dst = vec![0u8; TILE_BYTES];
+    let mut dst = vec![0_u8; TILE_BYTES];
     amx.with_tiles(|t| {
         t.load::<T0>(&src, ROW_BYTES);
         let msg = panic_message(|| amx.with_tiles(|_| ()));
@@ -135,18 +138,18 @@ fn session_refuses_a_foreign_configuration_and_leaves_it_alone() {
         return;
     };
     // Palette 1 with only tmm0, at 8 rows of 32 bytes: nothing like the crate's descriptor.
-    let mut foreign = [0u8; 64];
+    let mut foreign = [0_u8; 64];
     foreign[0] = 1;
-    foreign[16..18].copy_from_slice(&32u16.to_le_bytes());
+    foreign[16..18].copy_from_slice(&32_u16.to_le_bytes());
     foreign[48] = 8;
     let data = Lcg::new(6).bytes(8 * 32);
-    let mut back = vec![0u8; 8 * 32];
+    let mut back = vec![0_u8; 8 * 32];
     // SAFETY: the token proves AMX-TILE. The descriptor is valid for palette 1; tmm0's 8 rows
     // of 32 bytes at stride 32 are exactly `data` and `back`. TILERELEASE runs before any
     // session below expects released tiles.
     unsafe {
         std::arch::asm!("ldtilecfg [{}]", in(reg) foreign.as_ptr(), options(nostack, readonly, preserves_flags));
-        std::arch::asm!("tileloadd tmm0, [{} + {}*1]", in(reg) data.as_ptr(), in(reg) 32usize,
+        std::arch::asm!("tileloadd tmm0, [{} + {}*1]", in(reg) data.as_ptr(), in(reg) 32_usize,
                         options(nostack, readonly, preserves_flags));
     }
     let msg = panic_message(|| amx.with_tiles(|_| ()));
@@ -169,7 +172,7 @@ fn session_refuses_a_foreign_configuration_and_leaves_it_alone() {
     );
     // SAFETY: as above; tmm0 is still configured as 8 x 32.
     unsafe {
-        std::arch::asm!("tilestored [{} + {}*1], tmm0", in(reg) back.as_mut_ptr(), in(reg) 32usize,
+        std::arch::asm!("tilestored [{} + {}*1], tmm0", in(reg) back.as_mut_ptr(), in(reg) 32_usize,
                         options(nostack, preserves_flags));
         std::arch::asm!("tilerelease", options(nostack, nomem, preserves_flags));
     }
@@ -191,7 +194,7 @@ fn panic_inside_session_releases_tiles() {
         amx.with_tiles(|t| {
             t.zero::<T0>();
             panic!("boom inside the session");
-        })
+        });
     });
     assert_eq!(msg, "boom inside the session");
     assert_eq!(
@@ -210,7 +213,7 @@ fn sessions_on_many_threads_are_independent() {
         return;
     };
     std::thread::scope(|s| {
-        for i in 0..8u64 {
+        for i in 0..8_u64 {
             s.spawn(move || {
                 for round in 0..50 {
                     round_trip(amx, i * 1000 + round);
@@ -239,7 +242,7 @@ fn tile_data_survives_context_switches() {
                         Lcg::new(seed).bytes(TILE_BYTES),
                         Lcg::new(seed + 1).bytes(TILE_BYTES),
                     );
-                    let (mut a2, mut b2) = (vec![0u8; TILE_BYTES], vec![0u8; TILE_BYTES]);
+                    let (mut a2, mut b2) = (vec![0_u8; TILE_BYTES], vec![0_u8; TILE_BYTES]);
                     amx.with_tiles(|t| {
                         t.load::<T2>(&a, ROW_BYTES);
                         t.load::<T5>(&b, ROW_BYTES);

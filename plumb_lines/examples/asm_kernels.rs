@@ -1,4 +1,7 @@
-//! Named kernels for the asm gate on plumb_lines' own codegen:
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Named kernels for the asm gate on `plumb_lines`' own codegen:
 //! `python bench/asm_check.py --package plumb_lines --example asm_kernels [--toolchain stable]`.
 //! The bench binary is built with the `nightly` feature; this example checks the default
 //! (stable, `asm!`) paths. Run as a program, it calls each kernel once as a smoke test.
@@ -35,7 +38,10 @@ fn nt_fill<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(simd: S, buf: &mu
 }
 
 /// Write a line, flush it: the per-line `flush_line` in a hand-unrolled loop (its docs).
-#[allow(clippy::chunks_exact_to_as_chunks, reason = "V::LEN is generic; as_chunks needs a concrete constant")]
+#[allow(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "V::LEN is generic; as_chunks needs a concrete constant"
+)]
 #[simd]
 fn wflush<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, cf: Clflushopt, lines: &mut [Line]) {
     let p = V::splat(simd, PAT);
@@ -57,65 +63,76 @@ fn wflush<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, cf: Clflushopt, lines:
     plumb_lines::mfence();
 }
 
+/// Range flush + MFENCE (`flush_range_to_dram`).
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_flush(cf: Clflushopt, buf: &[u64]) {
-    cf.flush(buf)
+    cf.flush(buf);
 }
 
+/// Fill through the aligned view, then flush the range (`flush_after`), AVX2.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_fillflush_256(t: Avx2, cf: Clflushopt, buf: &mut [u64]) {
-    plumb_lines::flush_after(cf, buf, |b| fill::<Avx2, u64x4<Avx2>>(t, b))
+    plumb_lines::flush_after(cf, buf, |b| fill::<Avx2, u64x4<Avx2>>(t, b));
 }
 
+/// Fill through the aligned view, then flush the range (`flush_after`), AVX-512.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_fillflush_512(t: Avx512, cf: Clflushopt, buf: &mut [u64]) {
-    plumb_lines::flush_after(cf, buf, |b| fill::<Avx512, u64x8<Avx512>>(t, b))
+    plumb_lines::flush_after(cf, buf, |b| fill::<Avx512, u64x8<Avx512>>(t, b));
 }
 
+/// Constant NT fill through the `nontemporal` scope, AVX2.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_ntfill_256(t: Avx2, buf: &mut [u64]) {
-    nt_fill::<Avx2, u64x4<Avx2>>(t, buf)
+    nt_fill::<Avx2, u64x4<Avx2>>(t, buf);
 }
 
+/// Constant NT fill through the `nontemporal` scope, AVX-512.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_ntfill_512(t: Avx512, buf: &mut [u64]) {
-    nt_fill::<Avx512, u64x8<Avx512>>(t, buf)
+    nt_fill::<Avx512, u64x8<Avx512>>(t, buf);
 }
 
+/// Write each line and flush it with the per-line `flush_line`, AVX2.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_wflush_256(t: Avx2, cf: Clflushopt, lines: &mut [Line]) {
-    wflush::<Avx2, u64x4<Avx2>>(t, cf, lines)
+    wflush::<Avx2, u64x4<Avx2>>(t, cf, lines);
 }
 
+/// Write each line and flush it with the per-line `flush_line`, AVX-512.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_wflush_512(t: Avx512, cf: Clflushopt, lines: &mut [Line]) {
-    wflush::<Avx512, u64x8<Avx512>>(t, cf, lines)
+    wflush::<Avx512, u64x8<Avx512>>(t, cf, lines);
 }
 
+/// MOVDIR64B fill through the `direct` scope.
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_lines_directfill(md: Movdir64b, dst: &mut [Line], line: &Line) {
-    plumb_lines::direct(md, dst, |w| w.fill(line))
+    plumb_lines::direct(md, dst, |w| w.fill(line));
 }
 
 /// The lines as u64 words, from word 3 on (so the views have a misaligned head).
 fn words(lines: &mut [Line]) -> &mut [u64] {
     // SAFETY: Line is [u64; 8]; the result borrows `lines`.
-    let all = unsafe { std::slice::from_raw_parts_mut(lines.as_mut_ptr() as *mut u64, lines.len() * 8) };
+    let all =
+        unsafe { std::slice::from_raw_parts_mut(lines.as_mut_ptr() as *mut u64, lines.len() * 8) };
     &mut all[3..]
 }
 
 fn main() {
     let level = Level::new();
     let mut lines = vec![Line::default(); 4096 + 3];
-    let Some(cf) = Clflushopt::try_new() else { return println!("no CLFLUSHOPT; nothing run") };
+    let Some(cf) = Clflushopt::try_new() else {
+        return println!("no CLFLUSHOPT; nothing run");
+    };
     k_lines_flush(cf, black_box(words(&mut lines)));
     if let Some(t) = level.as_avx2() {
         k_lines_fillflush_256(t, cf, black_box(words(&mut lines)));
@@ -131,6 +148,9 @@ fn main() {
         let src = Line([PAT; 8]);
         k_lines_directfill(md, black_box(&mut lines), &src);
     }
-    assert!(lines.iter().all(|l| *l == Line([PAT; 8])));
+    assert!(
+        lines.iter().all(|l| *l == Line([PAT; 8])),
+        "the last fill must cover every line"
+    );
     println!("all kernels ran");
 }

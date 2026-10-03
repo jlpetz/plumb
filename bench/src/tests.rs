@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Port-correctness: every fearless_simd kernel must produce exactly what its TMR-style twin
 //! produces, and every verify must catch a single flipped bit anywhere, including the tail
 //! loops. Fast numbers from a wrong kernel would be worthless, so these run before any timing.
@@ -78,11 +81,19 @@ fn check_verifiers(name: &str, fill: &dyn Fn(&mut [u64]), verifiers: Vec<(&str, 
         let buf = &mut a.as_mut_slice()[..n];
         fill(buf);
         for (vname, v) in &verifiers {
-            assert_eq!(v(buf), 0, "{name}/{vname}: false positive on clean data, n={n}");
+            assert_eq!(
+                v(buf),
+                0,
+                "{name}/{vname}: false positive on clean data, n={n}"
+            );
             for &i in &[0, n / 2, n - 1, n.saturating_sub(9), n.saturating_sub(17)] {
                 for bit in [0u32, 37, 63] {
                     buf[i] ^= 1 << bit;
-                    assert_eq!(v(buf), 1, "{name}/{vname}: missed flip at word {i} bit {bit}, n={n}");
+                    assert_eq!(
+                        v(buf),
+                        1,
+                        "{name}/{vname}: missed flip at word {i} bit {bit}, n={n}"
+                    );
                     buf[i] ^= 1 << bit;
                 }
             }
@@ -101,8 +112,14 @@ fn fill_matches() {
         ("fs_256", Box::new(move |b| fs::k_fill_fs_256(t2, b))),
         ("fs_auto", Box::new(move |b| fs::k_fill_fs_auto(lvl, b))),
         ("wflush_tmr_256", Box::new(tw(tmr::k_wflush_tmr_256))),
-        ("wflush_fsintr_256", Box::new(move |b| fs::k_wflush_fsintr_256(t2, b))),
-        ("wflush_fsasm_256", Box::new(move |b| fs::k_wflush_fsasm_256(t2, b))),
+        (
+            "wflush_fsintr_256",
+            Box::new(move |b| fs::k_wflush_fsintr_256(t2, b)),
+        ),
+        (
+            "wflush_fsasm_256",
+            Box::new(move |b| fs::k_wflush_fsasm_256(t2, b)),
+        ),
     ];
     if t.tmr512 {
         ws.push(("tmr_512", Box::new(tw(tmr::k_fill_tmr_512))));
@@ -110,8 +127,14 @@ fn fill_matches() {
     }
     if let Some(t5) = t.t5 {
         ws.push(("fs_512", Box::new(move |b| fs::k_fill_fs_512(t5, b))));
-        ws.push(("wflush_fsintr_512", Box::new(move |b| fs::k_wflush_fsintr_512(t5, b))));
-        ws.push(("wflush_fsasm_512", Box::new(move |b| fs::k_wflush_fsasm_512(t5, b))));
+        ws.push((
+            "wflush_fsintr_512",
+            Box::new(move |b| fs::k_wflush_fsintr_512(t5, b)),
+        ));
+        ws.push((
+            "wflush_fsasm_512",
+            Box::new(move |b| fs::k_wflush_fsasm_512(t5, b)),
+        ));
     }
     check_writers("fill", ws, |_| PATTERN);
 
@@ -138,11 +161,26 @@ fn verify4_matches() {
         ("pfv_tmr_128", Box::new(tr(tmr::k_pfv_tmr_128))),
         ("pfv_tmr_256", Box::new(tr(tmr::k_pfv_tmr_256))),
         ("pfv_fs_256", Box::new(move |b| fs::k_pfv_fs_256(t2, b))),
-        ("fssplit_128", Box::new(move |b| fs::k_verify4_fssplit_128(t2, b))),
-        ("fssplit_256", Box::new(move |b| fs::k_verify4_fssplit_256(t2, b))),
-        ("fsptr_128", Box::new(move |b| fs::k_verify4_fsptr_128(t2, b))),
-        ("fsptr_256", Box::new(move |b| fs::k_verify4_fsptr_256(t2, b))),
-        ("pfv_fsptr_256", Box::new(move |b| fs::k_pfv_fsptr_256(t2, b))),
+        (
+            "fssplit_128",
+            Box::new(move |b| fs::k_verify4_fssplit_128(t2, b)),
+        ),
+        (
+            "fssplit_256",
+            Box::new(move |b| fs::k_verify4_fssplit_256(t2, b)),
+        ),
+        (
+            "fsptr_128",
+            Box::new(move |b| fs::k_verify4_fsptr_128(t2, b)),
+        ),
+        (
+            "fsptr_256",
+            Box::new(move |b| fs::k_verify4_fsptr_256(t2, b)),
+        ),
+        (
+            "pfv_fsptr_256",
+            Box::new(move |b| fs::k_pfv_fsptr_256(t2, b)),
+        ),
     ];
     if t.tmr512 {
         vs.push(("tmr_512", Box::new(tr(tmr::k_verify4_tmr_512))));
@@ -151,9 +189,18 @@ fn verify4_matches() {
     if let Some(t5) = t.t5 {
         vs.push(("fs_512", Box::new(move |b| fs::k_verify4_fs_512(t5, b))));
         vs.push(("pfv_fs_512", Box::new(move |b| fs::k_pfv_fs_512(t5, b))));
-        vs.push(("fssplit_512", Box::new(move |b| fs::k_verify4_fssplit_512(t5, b))));
-        vs.push(("fsptr_512", Box::new(move |b| fs::k_verify4_fsptr_512(t5, b))));
-        vs.push(("pfv_fsptr_512", Box::new(move |b| fs::k_pfv_fsptr_512(t5, b))));
+        vs.push((
+            "fssplit_512",
+            Box::new(move |b| fs::k_verify4_fssplit_512(t5, b)),
+        ));
+        vs.push((
+            "fsptr_512",
+            Box::new(move |b| fs::k_verify4_fsptr_512(t5, b)),
+        ));
+        vs.push((
+            "pfv_fsptr_512",
+            Box::new(move |b| fs::k_pfv_fsptr_512(t5, b)),
+        ));
     }
     check_verifiers("verify4", &|b: &mut [u64]| b.fill(PATTERN), vs);
 }
@@ -163,7 +210,9 @@ fn verify4_matches() {
 #[test]
 fn helper_footguns_are_correct() {
     let Some(t) = toks() else { return };
-    let (Some(t5), true) = (t.t5, t.tmr512) else { return };
+    let (Some(t5), true) = (t.t5, t.tmr512) else {
+        return;
+    };
     let (mut a, _) = bufs();
     let buf = &mut a.as_mut_slice()[..4096];
     buf.fill(PATTERN);
@@ -281,14 +330,18 @@ fn copies_match() {
     };
     if t.tmr512 {
         // SAFETY: equal-length aligned buffers; AVX-512 checked.
-        run("nt_tmr_512", &|d, s| unsafe { tmr::k_copynt_tmr_512(d.as_mut_ptr(), s.as_ptr(), s.len()) });
+        run("nt_tmr_512", &|d, s| unsafe {
+            tmr::k_copynt_tmr_512(d.as_mut_ptr(), s.as_ptr(), s.len())
+        });
     }
     if let Some(t5) = t.t5 {
         run("nt_fs_512", &|d, s| fs::k_copynt_fs_512(t5, d, s));
     }
     if t.cpu.movdir64b {
         // SAFETY: as above; MOVDIR64B checked.
-        run("md_tmr", &|d, s| unsafe { tmr::k_copymd_tmr(d.as_mut_ptr(), s.as_ptr(), s.len()) });
+        run("md_tmr", &|d, s| unsafe {
+            tmr::k_copymd_tmr(d.as_mut_ptr(), s.as_ptr(), s.len())
+        });
         let t2 = t.t2;
         run("md_fs", &|d, s| fs::k_copymd_fs(t2, d, s));
     } else {
@@ -310,11 +363,15 @@ fn cap_clflushopt_matches() {
     let Some(t) = toks() else { return };
     let cf = crate::cap::Clflushopt::try_new().expect("CLFLUSHOPT checked in toks()");
     let t2 = t.t2;
-    let mut ws: Vec<(&str, W)> = vec![
-        ("fscap_256", Box::new(move |b| crate::cap::k_wflush_fscap_256(t2, cf, b, PATTERN))),
-    ];
+    let mut ws: Vec<(&str, W)> = vec![(
+        "fscap_256",
+        Box::new(move |b| crate::cap::k_wflush_fscap_256(t2, cf, b, PATTERN)),
+    )];
     if let Some(t5) = t.t5 {
-        ws.push(("fscap_512", Box::new(move |b| crate::cap::k_wflush_fscap_512(t5, cf, b, PATTERN))));
+        ws.push((
+            "fscap_512",
+            Box::new(move |b| crate::cap::k_wflush_fscap_512(t5, cf, b, PATTERN)),
+        ));
     }
     check_writers("wflush_cap", ws, |_| PATTERN);
     let (mut a, _) = bufs();
@@ -332,14 +389,49 @@ fn level_features_are_detected() {
     use crate::cap::{AVX2_CLFLUSHOPT, AVX512_CLFLUSHOPT};
     let src = include_str!("cap.rs");
     for list in [AVX2_CLFLUSHOPT, AVX512_CLFLUSHOPT] {
-        assert!(src.contains(&format!("enable = \"{list}\"")), "macro literal drifted from {list}");
+        assert!(
+            src.contains(&format!("enable = \"{list}\"")),
+            "macro literal drifted from {list}"
+        );
     }
     fn detected(f: &str) -> bool {
         macro_rules! d { ($($n:tt),*) => { match f { $($n => is_x86_feature_detected!($n),)* "clflushopt" => detect().clflushopt, _ => panic!("unknown feature {f}") } } }
-        d!("fxsr", "adx", "aes", "avx2", "avx512bitalg", "avx512bw", "avx512cd", "avx512dq", "avx512f",
-           "avx512ifma", "avx512vbmi", "avx512vbmi2", "avx512vl", "avx512vnni", "avx512vpopcntdq",
-           "bmi1", "bmi2", "cmpxchg16b", "f16c", "fma", "gfni", "lzcnt", "movbe", "pclmulqdq",
-           "popcnt", "rdrand", "rdseed", "sha", "vaes", "vpclmulqdq", "xsave", "xsavec", "xsaveopt", "xsaves")
+        d!(
+            "fxsr",
+            "adx",
+            "aes",
+            "avx2",
+            "avx512bitalg",
+            "avx512bw",
+            "avx512cd",
+            "avx512dq",
+            "avx512f",
+            "avx512ifma",
+            "avx512vbmi",
+            "avx512vbmi2",
+            "avx512vl",
+            "avx512vnni",
+            "avx512vpopcntdq",
+            "bmi1",
+            "bmi2",
+            "cmpxchg16b",
+            "f16c",
+            "fma",
+            "gfni",
+            "lzcnt",
+            "movbe",
+            "pclmulqdq",
+            "popcnt",
+            "rdrand",
+            "rdseed",
+            "sha",
+            "vaes",
+            "vpclmulqdq",
+            "xsave",
+            "xsavec",
+            "xsaveopt",
+            "xsaves"
+        )
     }
     let level = Level::new();
     if level.as_avx2().is_some() {
@@ -349,7 +441,10 @@ fn level_features_are_detected() {
     }
     if level.as_avx512().is_some() {
         for f in AVX512_CLFLUSHOPT.split(',') {
-            assert!(detected(f), "Avx512 entry enables {f}, which this CPU lacks");
+            assert!(
+                detected(f),
+                "Avx512 entry enables {f}, which this CPU lacks"
+            );
         }
     }
 }

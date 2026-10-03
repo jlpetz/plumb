@@ -1,3 +1,6 @@
+// Copyright 2026 the plumb Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Tile loads and stores flush against inaccessible pages (Windows: `VirtualAlloc`, then
 //! `PAGE_NOACCESS` on the pages either side). Next to a heap `Vec` a load that reads past the
 //! checked span goes unnoticed, because the bytes after it are readable; here a single byte
@@ -98,7 +101,7 @@ fn check(
     let before = Lcg::new(seed).bytes(DATA);
     mem.bytes().copy_from_slice(&before);
     let tile = Lcg::new(seed + 1000).bytes(TILE_BYTES);
-    let (mut a, mut b) = (vec![0u8; TILE_BYTES], vec![0u8; TILE_BYTES]);
+    let (mut a, mut b) = (vec![0_u8; TILE_BYTES], vec![0_u8; TILE_BYTES]);
     amx.with_tiles(|t| {
         if words {
             let buf = &mut mem.words()[start / 8..][..len / 8];
