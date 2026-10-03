@@ -461,6 +461,16 @@ fn port_entries_are_wired_right() {
             STUCKBIT_P1,
         ));
         cases.push((
+            "k_sb_plplain_512",
+            Box::new(move |b| tmrport::k_sb_plplain_512(t5, t.cf, b)),
+            STUCKBIT_P1,
+        ));
+        cases.push((
+            "k_sbnf_plplain_512",
+            Box::new(move |b| tmrport::k_sbnf_plplain_512(t5, t.cf, b)),
+            STUCKBIT_P1,
+        ));
+        cases.push((
             "k_refresh_tmr_512",
             Box::new(tmrport::k_refresh_tmr_512),
             REFRESH_PATTERN,

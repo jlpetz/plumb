@@ -37,6 +37,20 @@ pub fn fill_view<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &mut [u64]
     tail.iter_mut().take(V::LEN - 1).for_each(|w| *w = pat);
 }
 
+/// Reproduction, kept for timing: `fill_view`'s earlier shape, a plain loop over the middle that
+/// relies on LLVM's unroller. Inlined into the StuckBit port at 512 bits it runs one store per
+/// iteration (`k_sb_plplain_512`); the bench measures whether that costs anything.
+#[simd]
+pub fn fill_view_plain<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &mut [u64], pat: u64) {
+    let (head, mid, tail) = plumb_lines::as_vectors_mut::<S, V>(simd, buf);
+    head.iter_mut().take(V::LEN - 1).for_each(|w| *w = pat);
+    let p = V::splat(simd, pat);
+    for v in mid.iter_mut() {
+        *v = p;
+    }
+    tail.iter_mut().take(V::LEN - 1).for_each(|w| *w = pat);
+}
+
 /// 4-accumulator verify through the aligned view. The vectors are a `&[V]`, so the loop is a
 /// pointer walk (the shape that fixed the 512-bit L2 gap; TODO 84 findings).
 #[simd]

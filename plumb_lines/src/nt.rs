@@ -94,9 +94,11 @@
 //!
 //! # Performance notes
 //!
-//! [`NtWriter::fill_with`] unrolls 4x: the stream intrinsics are `asm!` inside stdarch, so LLVM
-//! won't unroll a loop around them (TMR's `simple_write_nt_positional_simd!` does the same by
-//! hand). A cache line written only partly before its write-combining buffer drains takes a slow
+//! [`NtWriter::fill_with`] unrolls 4x and issues each group of four stores from one `asm!`
+//! block, with the offsets as displacements. stdarch's stream intrinsics are `asm!` too (on
+//! purpose: rust-lang/rust#114582), so LLVM won't unroll a loop around them, and each one takes
+//! its address in a register, which costs a `lea` per store when called four times. TMR's
+//! `simple_write_nt_positional_simd!` unrolls by hand and pays the `lea`s. A cache line written only partly before its write-combining buffer drains takes a slow
 //! path on current Intel parts. Sequential fills that write whole lines with adjacent narrower
 //! stores (4 x 128-bit or 2 x 256-bit) are fine; in TMR's multi-threaded runs 128-bit was the
 //! fastest sequential NT width. The slow case is isolated or scattered partial-line stores.
@@ -123,13 +125,70 @@ pub trait NtBytes<S: Simd>: Copy + sealed::Sealed {
     /// (no reads and no writes, including another streaming store), and it must not be handed to
     /// another thread.
     unsafe fn stream_bytes(self, dst: *mut Self);
+
+    /// Four consecutive streaming stores, `vs[k]` to `dst + k`, in order.
+    ///
+    /// # Safety
+    /// As [`Self::stream_bytes`], for all four destinations `dst..dst + 4`.
+    #[inline(always)]
+    unsafe fn stream4_bytes(vs: [Self; 4], dst: *mut Self) {
+        for (k, v) in vs.into_iter().enumerate() {
+            // SAFETY: forwarded; dst + k is one of the four destinations.
+            unsafe { v.stream_bytes(dst.add(k)) }
+        }
+    }
 }
 
 macro_rules! nt_bytes {
-    // One native-width store.
-    ($Tok:ident, $V:ident, native $arch:ty, $stream:ident) => {
+    // One native-width store; four in one `asm!` block (`$insn`, register class `$reg`, `$size`
+    // bytes apart) so the offsets are displacements.
+    ($Tok:ident, $V:ident, native $arch:ty, $stream:ident, $insn:literal $reg:ident $size:literal) => {
         impl sealed::Sealed for fearless_simd::$V<fearless_simd::$Tok> {}
         impl NtBytes<fearless_simd::$Tok> for fearless_simd::$V<fearless_simd::$Tok> {
+            #[inline(always)]
+            unsafe fn stream4_bytes(vs: [Self; 4], dst: *mut Self) {
+                fearless_simd::kernel!(
+                    #[inline(always)]
+                    #[allow(
+                        clippy::not_unsafe_ptr_arg_deref,
+                        reason = "the contract is on NtBytes::stream4_bytes"
+                    )]
+                    fn k(
+                        _t: $Tok,
+                        a: fearless_simd::$V<fearless_simd::$Tok>,
+                        b: fearless_simd::$V<fearless_simd::$Tok>,
+                        c: fearless_simd::$V<fearless_simd::$Tok>,
+                        d: fearless_simd::$V<fearless_simd::$Tok>,
+                        dst: *mut $arch,
+                    ) {
+                        let (a, b, c, d): ($arch, $arch, $arch, $arch) =
+                            (a.into(), b.into(), c.into(), d.into());
+                        // SAFETY: forwarded from NtBytes::stream4_bytes: `dst..dst + 4` is valid
+                        // and aligned. No `nomem`/`readonly`: the block writes memory, and the
+                        // compiler must keep it ordered with the surrounding accesses.
+                        unsafe {
+                            core::arch::asm!(
+                                concat!($insn, " [{p}], {a}"),
+                                concat!($insn, " [{p} + {o1}], {b}"),
+                                concat!($insn, " [{p} + {o2}], {c}"),
+                                concat!($insn, " [{p} + {o3}], {d}"),
+                                p = in(reg) dst,
+                                a = in($reg) a,
+                                b = in($reg) b,
+                                c = in($reg) c,
+                                d = in($reg) d,
+                                o1 = const $size,
+                                o2 = const 2 * $size,
+                                o3 = const 3 * $size,
+                                options(nostack, preserves_flags),
+                            );
+                        }
+                    }
+                );
+                let [a, b, c, d] = vs;
+                k(a.simd, a, b, c, d, dst.cast());
+            }
+
             #[inline(always)]
             unsafe fn stream_bytes(self, dst: *mut Self) {
                 fearless_simd::kernel!(
@@ -180,19 +239,22 @@ macro_rules! nt_bytes {
     };
 }
 
+// The four-store blocks use the VEX/EVEX form (`vmovntdq`) where AVX is enabled, and the SSE
+// form (`movntdq`) on the SSE levels. Vectors wider than the level's registers ("parts") use the
+// trait's default `stream4_bytes`: four calls to the per-store path.
 use core::arch::x86_64::{__m128i, __m256i, __m512i};
-nt_bytes!(Sse2, u8x16, native __m128i, _mm_stream_si128);
+nt_bytes!(Sse2, u8x16, native __m128i, _mm_stream_si128, "movntdq xmmword ptr" xmm_reg 16);
 nt_bytes!(Sse2, u8x32, parts 2 x __m128i, _mm_stream_si128);
 nt_bytes!(Sse2, u8x64, parts 4 x __m128i, _mm_stream_si128);
-nt_bytes!(Sse4_2, u8x16, native __m128i, _mm_stream_si128);
+nt_bytes!(Sse4_2, u8x16, native __m128i, _mm_stream_si128, "movntdq xmmword ptr" xmm_reg 16);
 nt_bytes!(Sse4_2, u8x32, parts 2 x __m128i, _mm_stream_si128);
 nt_bytes!(Sse4_2, u8x64, parts 4 x __m128i, _mm_stream_si128);
-nt_bytes!(Avx2, u8x16, native __m128i, _mm_stream_si128);
-nt_bytes!(Avx2, u8x32, native __m256i, _mm256_stream_si256);
+nt_bytes!(Avx2, u8x16, native __m128i, _mm_stream_si128, "vmovntdq xmmword ptr" xmm_reg 16);
+nt_bytes!(Avx2, u8x32, native __m256i, _mm256_stream_si256, "vmovntdq ymmword ptr" ymm_reg 32);
 nt_bytes!(Avx2, u8x64, parts 2 x __m256i, _mm256_stream_si256);
-nt_bytes!(Avx512, u8x16, native __m128i, _mm_stream_si128);
-nt_bytes!(Avx512, u8x32, native __m256i, _mm256_stream_si256);
-nt_bytes!(Avx512, u8x64, native __m512i, _mm512_stream_si512);
+nt_bytes!(Avx512, u8x16, native __m128i, _mm_stream_si128, "vmovntdq xmmword ptr" xmm_reg 16);
+nt_bytes!(Avx512, u8x32, native __m256i, _mm256_stream_si256, "vmovntdq ymmword ptr" ymm_reg 32);
+nt_bytes!(Avx512, u8x64, native __m512i, _mm512_stream_si512, "vmovntdq zmmword ptr" zmm_reg 64);
 
 /// A non-temporal store for any fearless vector: it's reinterpreted as its byte vector (a free
 /// bitcast) and streamed with [`NtBytes`].
@@ -202,6 +264,13 @@ pub trait NtStore<S: Simd>: SimdBase<S> {
     /// that memory (read or write) and no publishing before this thread's `SFENCE`. Prefer the
     /// safe [`nontemporal`] scope.
     unsafe fn stream(self, dst: *mut Self);
+
+    /// Four consecutive streaming stores, `vs[k]` to `dst + k`, from one `asm!` block where the
+    /// level has a native register for the vector.
+    ///
+    /// # Safety
+    /// As [`Self::stream`], for all four destinations `dst..dst + 4`.
+    unsafe fn stream4(vs: [Self; 4], dst: *mut Self);
 }
 
 impl<S: Simd, V: SimdBase<S> + Bytes> NtStore<S> for V
@@ -213,6 +282,14 @@ where
         // SAFETY: a vector and its byte vector have the same size and alignment; the rest of the
         // contract is the caller's.
         unsafe { self.to_bytes().stream_bytes(dst.cast()) }
+    }
+
+    #[inline(always)]
+    unsafe fn stream4(vs: [Self; 4], dst: *mut Self) {
+        let [a, b, c, d] = vs;
+        let bytes = [a.to_bytes(), b.to_bytes(), c.to_bytes(), d.to_bytes()];
+        // SAFETY: as `stream`, for four consecutive vectors.
+        unsafe { V::Bytes::stream4_bytes(bytes, dst.cast()) }
     }
 }
 
@@ -296,15 +373,10 @@ impl<'a, S: Simd, V: NtStore<S>> NtWriter<'a, S, V> {
         let end4 = n & !3;
         let mut i = 0;
         while i < end4 {
-            let (v0, v1, v2, v3) = (f(i), f(i + 1), f(i + 2), f(i + 3));
+            let vs = [f(i), f(i + 1), f(i + 2), f(i + 3)];
             // SAFETY: i + 3 < n; `ptr` came from a `&mut [V]`, so it's aligned; each slot is
             // written once; the scope fences.
-            unsafe {
-                v0.stream(p.add(i));
-                v1.stream(p.add(i + 1));
-                v2.stream(p.add(i + 2));
-                v3.stream(p.add(i + 3));
-            }
+            unsafe { V::stream4(vs, p.add(i)) };
             i += 4;
         }
         while i < n {

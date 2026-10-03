@@ -26,7 +26,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::common::*;
-use crate::lines::{fill_view, ntw_scope_at, pos_verify_view_at, verify4_view};
+use crate::lines::{fill_view, fill_view_plain, ntw_scope_at, pos_verify_view_at, verify4_view};
 use fearless_simd::{Avx2, Avx512, Simd, SimdInt, u64x4, u64x8};
 use fearless_simd_macros::simd;
 use plumb_lines::{Clflushopt, NtStore};
@@ -310,6 +310,35 @@ pub fn stuckbit_pl<S: Simd, V: SimdInt<S, Element = u64>, F: FnMut(&mut [u64])>(
     errs
 }
 
+/// StuckBit with `fill_view_plain` (the fill's earlier, LLVM-unrolled shape): the reproduction
+/// for timing the lost unroll. Otherwise identical to `stuckbit_pl`.
+#[simd]
+pub fn stuckbit_pl_plainfill<S: Simd, V: SimdInt<S, Element = u64>, F: FnMut(&mut [u64])>(
+    simd: S,
+    cf: Clflushopt,
+    buf: &mut [u64],
+    flush: bool,
+    mut inject: F,
+) -> u64 {
+    let mut errs = 0;
+    for chunk in buf.chunks_mut(CHUNK_U64.max(1024 * V::LEN)) {
+        for pat in [STUCKBIT_P1, STUCKBIT_P2, STUCKBIT_P1] {
+            if flush {
+                plumb_lines::flush_after(cf, chunk, |c| {
+                    fill_view_plain::<S, V>(simd, c, pat);
+                    fence(Ordering::SeqCst);
+                });
+            } else {
+                fill_view_plain::<S, V>(simd, chunk, pat);
+                fence(Ordering::SeqCst);
+            }
+            inject(chunk);
+            errs += verify4_view::<S, V>(simd, chunk, pat);
+        }
+    }
+    errs
+}
+
 /// Refresh (sleep omitted): write, flush if enabled, verify.
 #[simd]
 pub fn refresh_pl<S: Simd, V: SimdInt<S, Element = u64>, F: FnMut(&mut [u64])>(
@@ -412,6 +441,8 @@ pl_entry!(k_sb_pl_256, Avx2, u64x4, stuckbit_pl, flush true);
 pl_entry!(k_sb_pl_512, Avx512, u64x8, stuckbit_pl, flush true);
 pl_entry!(k_sbnf_pl_256, Avx2, u64x4, stuckbit_pl, flush false);
 pl_entry!(k_sbnf_pl_512, Avx512, u64x8, stuckbit_pl, flush false);
+pl_entry!(k_sb_plplain_512, Avx512, u64x8, stuckbit_pl_plainfill, flush true);
+pl_entry!(k_sbnf_plplain_512, Avx512, u64x8, stuckbit_pl_plainfill, flush false);
 pl_entry!(k_refresh_pl_256, Avx2, u64x4, refresh_pl, flush true);
 pl_entry!(k_refresh_pl_512, Avx512, u64x8, refresh_pl, flush true);
 pl_entry!(k_simplent_pl_256, Avx2, u64x4, simplent_pl);

@@ -788,6 +788,10 @@ fn port_group<'a>(
             }
             if let Some(t5) = t512 {
                 vs.push(v!("pl_512", move |b| tmrport::k_sb_pl_512(t5, pcf, b)));
+                // The fill's earlier shape (LLVM-unrolled loop): does the lost unroll cost?
+                vs.push(v!("plplain_512", move |b| tmrport::k_sb_plplain_512(
+                    t5, pcf, b
+                )));
             }
         }
         "sbnf" => {
@@ -798,6 +802,10 @@ fn port_group<'a>(
             }
             if let Some(t5) = t512 {
                 vs.push(v!("pl_512", move |b| tmrport::k_sbnf_pl_512(t5, pcf, b)));
+                // The fill's earlier shape (LLVM-unrolled loop): does the lost unroll cost?
+                vs.push(v!("plplain_512", move |b| tmrport::k_sbnf_plplain_512(
+                    t5, pcf, b
+                )));
             }
         }
         "refresh" => {

@@ -123,12 +123,19 @@ def build(cargo_target, toolchain=None):
 
 
 def latest_s(stem, pkg=None):
-    # Older cargo: release/deps/<stem>-HASH.s (examples: release/examples/); newer build-dir
-    # layout: release/build/<pkg>/HASH/out/<stem>.s. Two packages can have an example of the same
-    # name, so prefer files under the package's own build dir.
+    # Older cargo (stable today): release/deps/<stem>-HASH.s, examples in release/examples/;
+    # newer build-dir layout (nightly): release/build/<pkg>/HASH/out/<stem>.s. Both can exist at
+    # once, and two packages can have an example of the same name (and so share
+    # release/examples/<stem>.s), so keep the files whose symbols name the package, then take the
+    # newest.
     files = glob.glob(os.path.join(TARGET, "release", "**", f"{stem}*.s"), recursive=True)
     if pkg:
-        own = [f for f in files if os.sep + pkg + os.sep in f]
+        crate = pkg.replace("-", "_")
+        own = []
+        for f in files:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                if crate in fh.read():
+                    own.append(f)
         files = own or files
     if not files:
         sys.exit(f"no {stem}*.s found; run without --no-build")
