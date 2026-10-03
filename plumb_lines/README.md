@@ -12,26 +12,34 @@ bandwidth-bound kernel) needs that a portable SIMD library doesn't have.
 | `direct` | MOVDIR64B: `Movdir64b` token, 64-byte-aligned `Line`, and a `direct` scope that `SFENCE`s on exit. |
 
 ```rust
-use fearless_simd::{prelude::*, u64x8};
+use fearless_simd::{prelude::*, Avx2, Level, u64x4};
+use plumb_lines::NtStore;
 
+/// Streaming fill. Level-generic code takes the vector type with an `NtStore<S>` bound and is
+/// called with a concrete token (see the `nt` module docs).
 #[fearless_simd_macros::simd]
-fn nt_fill<S: Simd>(simd: S, buf: &mut [u64], base: u64) {
-    let (head, vectors, tail) = plumb_lines::as_vectors_mut::<S, u64x8<S>>(simd, buf);
-    head.fill(base);
-    tail.fill(base);
-    plumb_lines::nontemporal(simd, vectors, |w| {
-        let v = u64x8::splat(simd, base);
-        w.fill_with(|_| v); // 4 streaming stores per iteration
-    }); // SFENCE here; `vectors` is borrowed until then
-}
+fn nt_fill<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(simd: S, buf: &mut [u64], value: u64) {
+    let (head, vectors, tail) = plumb_lines::as_vectors_mut::<S, V>(simd, buf);
+    head.fill(value);
+    tail.fill(value);
+    let v = V::splat(simd, value);
+    plumb_lines::nontemporal(simd, vectors, |w| w.fill_with(|_| v)); // 4 streaming stores/iteration
+} // SFENCE ran when the scope ended; `vectors` was borrowed until then
+
+let mut buf = vec![0u64; 1000];
+let avx2: Avx2 = Level::new().as_avx2().expect("an x86-64-v3 CPU");
+nt_fill::<Avx2, u64x4<Avx2>>(avx2, &mut buf[3..], 7); // any alignment: head/tail are scalar
+assert!(buf[3..].iter().all(|&w| w == 7));
 ```
 
 ## Safety model
 
-NT stores and MOVDIR64B are weakly ordered: the writing thread must `SFENCE` before anything
-reads the memory or hands it to another thread, and Rust's fences don't provide that on x86. So
-both happen inside **closure scopes** that borrow the destination mutably, give write-only access,
-and fence when they end, including on unwind. (A guard object can't do this: `mem::forget` would
+NT stores and MOVDIR64B are weakly ordered: until the writing thread executes `SFENCE`, nothing
+may access the memory (reads or writes, including another streaming store) and it must not be
+handed to another thread. Rust's fences don't provide that on x86. So
+both happen inside **closure scopes** that borrow the destination mutably and fence when they
+end, including on unwind. The writer they pass is by value, write-once and `!Send`, so each slot is
+stored at most once, never read inside the scope, and only from this thread. (A guard object can't do this: `mem::forget` would
 skip the fence.) Flushing is different: caches are coherent, so `flush_after` is about making a
 verify read come from DRAM, not memory safety, and it gives ordinary `&mut` access.
 
@@ -40,8 +48,8 @@ verify read come from DRAM, not memory safety, and it gives ordinary `&mut` acce
 Every hot-path function is `#[inline(always)]`. Call the scopes from inside a fearless `#[simd]`
 function or `kernel!`, so they inline into the function with the target features. The
 workspace's `bench/asm_check.py` checks the loops: the expected instruction, the named width, no
-calls, no `memset`. Measured against hand-written per-width kernels, NT write loops are
-instruction-for-instruction identical, and throughput is at parity (see the workspace README).
+calls, no `memset`, and loop sizes no worse than the hand-written per-width twin. Throughput is
+at parity with hand-written kernels (see the workspace README).
 
 ## Toolchains
 

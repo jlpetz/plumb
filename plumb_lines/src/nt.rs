@@ -1,21 +1,102 @@
 //! Non-temporal (streaming) stores, in a scope that ends with `SFENCE`.
 //!
-//! ```ignore
-//! let (head, vectors, tail) = plumb_lines::as_vectors_mut::<_, u64x8<_>>(simd, buf);
-//! plumb_lines::nontemporal(simd, vectors, |w| {
-//!     let mut idx = u64x8::from_fn(simd, |i| i as u64);
-//!     let step = u64x8::splat(simd, 8);
-//!     w.fill_with(|_| { let v = idx ^ base; idx += step; v });
-//! }); // SFENCE here; `vectors` is borrowed until then
+//! ```
+//! use fearless_simd::{prelude::*, Avx2, Level, u64x4};
+//!
+//! #[fearless_simd_macros::simd]
+//! fn nt_positional<S: Simd, V: SimdInt<S, Element = u64> + plumb_lines::NtStore<S>>(simd: S, buf: &mut [u64]) {
+//!     let (head, vectors, tail) = plumb_lines::as_vectors_mut::<S, V>(simd, buf);
+//!     assert!(head.is_empty() && tail.is_empty(), "this example keeps the buffer vector-aligned");
+//!     plumb_lines::nontemporal(simd, vectors, |w| {
+//!         let mut idx = V::from_fn(simd, |i| i as u64);
+//!         let step = V::splat(simd, V::LEN as u64);
+//!         w.fill_with(|_| { let v = idx; idx += step; v });
+//!     }); // SFENCE here; `vectors` is borrowed until then
+//! }
+//!
+//! // A 64-byte-aligned buffer of 128 u64 (a Vec<Line> provides the alignment).
+//! let mut lines = vec![plumb_lines::Line::default(); 16];
+//! // SAFETY: Line is [u64; 8].
+//! let buf = unsafe { std::slice::from_raw_parts_mut(lines.as_mut_ptr() as *mut u64, 128) };
+//! let avx2: Avx2 = Level::new().as_avx2().expect("x86-64-v3 CPU");
+//! nt_positional::<Avx2, u64x4<Avx2>>(avx2, buf);
+//! assert!(buf.iter().enumerate().all(|(i, &w)| w == i as u64));
 //! ```
 //!
-//! The writer never hands out a readable reference into the destination: reading memory with
-//! NT stores still in flight is exactly what the stdarch contract forbids. [`NtWriter::fill_with`]
-//! unrolls 4x, because the stream intrinsics are `asm!` inside stdarch and LLVM won't unroll a
-//! loop around them (TMR's `simple_write_nt_positional_simd!` does the same by hand).
+//! # The rule, and how the scope enforces it
 //!
-//! Only full 64-byte lines take the fast NT path on current Intel parts (one 512-bit store, or
-//! adjacent 256-bit pairs); narrower NT stores pay a per-line cost (TMR `doc/nt_stores.md`).
+//! stdarch's contract for streaming stores: after one, and **before any other access to that
+//! memory (read or write, including another streaming store)**, the storing thread must execute
+//! `SFENCE`, and the memory must not be handed to another thread before then. [`nontemporal`]
+//! enforces this in safe code:
+//!
+//! - the destination is mutably borrowed until the scope's `SFENCE` has run (also on unwind);
+//! - the [`NtWriter`] is passed **by value** and every way of writing consumes it
+//!   ([`NtWriter::fill_with`], [`NtWriter::into_slots`], [`NtWriter::split_at`]); an [`NtSlot`]
+//!   can store once. So each slot is written at most once and never read inside the scope;
+//! - writers and slots are neither `Send` nor `Sync`, so no other thread can store through them
+//!   (this thread's `SFENCE` wouldn't cover another thread's stores);
+//! - the closure is higher-ranked over the writer's lifetime, so nothing escapes the scope.
+//!
+//! ```compile_fail
+//! # use fearless_simd::{prelude::*, Level, u64x4};
+//! # let t = Level::new().as_avx2().unwrap();
+//! # let mut v = [u64x4::splat(t, 0); 4];
+//! // Two writes to the same slots: the writer is moved by the first.
+//! plumb_lines::nontemporal(t, &mut v, |w| { w.fill_with(|_| u64x4::splat(t, 1)); w.fill_with(|_| u64x4::splat(t, 2)) });
+//! ```
+//! ```compile_fail
+//! # use fearless_simd::{prelude::*, Level, u64x4};
+//! # let t = Level::new().as_avx2().unwrap();
+//! # let mut v = [u64x4::splat(t, 0); 4];
+//! // Reading the destination inside the scope: it is mutably borrowed.
+//! plumb_lines::nontemporal(t, &mut v, |w| { let _x = v[0]; w.fill_with(|_| u64x4::splat(t, 1)) });
+//! ```
+//! ```compile_fail
+//! # use fearless_simd::{prelude::*, Level, u64x4};
+//! # let t = Level::new().as_avx2().unwrap();
+//! # let mut v = [u64x4::splat(t, 0); 4];
+//! // A writer escaping the scope.
+//! let mut stash = None;
+//! plumb_lines::nontemporal(t, &mut v, |w| stash = Some(w));
+//! ```
+//! ```compile_fail
+//! # use fearless_simd::{prelude::*, Level, u64x4};
+//! # let t = Level::new().as_avx2().unwrap();
+//! # let mut v = [u64x4::splat(t, 0); 4];
+//! // Sending a writer to another thread.
+//! fn need_send<T: Send>(_: T) {}
+//! plumb_lines::nontemporal(t, &mut v, |w| need_send(w));
+//! ```
+//! ```compile_fail
+//! # use fearless_simd::{prelude::*, Level, u64x4};
+//! # let t = Level::new().as_avx2().unwrap();
+//! # let mut v = [u64x4::splat(t, 0); 4];
+//! // Sending a slot to another thread.
+//! fn need_send<T: Send>(_: T) {}
+//! plumb_lines::nontemporal(t, &mut v, |w| for s in w.into_slots() { need_send(s) });
+//! ```
+//!
+//! # Using it from generic code
+//!
+//! [`NtStore`] is implemented for the concrete x86 levels (`Sse2`, `Sse4_2`, `Avx2`, `Avx512`), so
+//! a level-generic kernel takes the vector type as a parameter with an `NtStore<S>` bound
+//! (`V: SimdInt<S, Element = u64> + NtStore<S>`, as above) and is called with a concrete token.
+//! It can't be called through fearless's `dispatch!`, whose token is an opaque `impl Simd`.
+//!
+//! Call the scope from inside a `#[simd]` function or `kernel!`. Outside one, the code still
+//! compiles and is correct, but at 512 bits every fearless op and every store becomes an
+//! out-of-line call (the 256-bit case only works because the workspace baseline is x86-64-v3).
+//! The bench keeps a kernel that does this (`k_ntw_plplain_512`) so the cost stays visible.
+//!
+//! # Performance notes
+//!
+//! [`NtWriter::fill_with`] unrolls 4x: the stream intrinsics are `asm!` inside stdarch, so LLVM
+//! won't unroll a loop around them (TMR's `simple_write_nt_positional_simd!` does the same by
+//! hand). A cache line written only partly before its write-combining buffer drains takes a slow
+//! path on current Intel parts. Sequential fills that write whole lines with adjacent narrower
+//! stores (4 x 128-bit or 2 x 256-bit) are fine; in TMR's multi-threaded runs 128-bit was the
+//! fastest sequential NT width. The slow case is isolated or scattered partial-line stores.
 
 use core::marker::PhantomData;
 use fearless_simd::{Bytes, Simd, SimdBase};
@@ -30,9 +111,10 @@ mod sealed {
 /// use [`NtStore`] (any fearless vector) or [`nontemporal`].
 pub trait NtBytes<S: Simd>: Copy + sealed::Sealed {
     /// # Safety
-    /// `dst` must be valid for writes of `size_of::<Self>()` bytes and aligned to that size, and
-    /// the calling thread must `SFENCE` ([`crate::sfence`]) before anything reads that memory or
-    /// before publishing it to another thread.
+    /// `dst` must be valid for writes of `size_of::<Self>()` bytes and aligned to that size. Until
+    /// the calling thread executes `SFENCE` ([`crate::sfence`]), nothing may access that memory
+    /// (no reads and no writes, including another streaming store), and it must not be handed to
+    /// another thread.
     unsafe fn stream_bytes(self, dst: *mut Self);
 }
 
@@ -98,8 +180,9 @@ nt_bytes!(Avx512, u8x64, native __m512i, _mm512_stream_si512);
 /// bitcast) and streamed with [`NtBytes`].
 pub trait NtStore<S: Simd>: SimdBase<S> {
     /// # Safety
-    /// As [`NtBytes::stream_bytes`]: `dst` valid and aligned for `Self`, and `SFENCE` before the
-    /// memory is read or published. Prefer the safe [`nontemporal`] scope.
+    /// As [`NtBytes::stream_bytes`]: `dst` valid and aligned for `Self`, and no other access to
+    /// that memory (read or write) and no publishing before this thread's `SFENCE`. Prefer the
+    /// safe [`nontemporal`] scope.
     unsafe fn stream(self, dst: *mut Self);
 }
 
@@ -115,14 +198,15 @@ where
     }
 }
 
-/// Write-only access to the destination of a [`nontemporal`] scope.
+/// Write-only, write-once access to the destination of a [`nontemporal`] scope. Passed by value;
+/// every way of writing consumes it, so each slot is written at most once.
 pub struct NtWriter<'a, S: Simd, V> {
     ptr: *mut V,
     len: usize,
     _scope: PhantomData<(&'a mut [V], S)>,
 }
 
-impl<S: Simd, V: NtStore<S>> NtWriter<'_, S, V> {
+impl<'a, S: Simd, V: NtStore<S>> NtWriter<'a, S, V> {
     /// Number of vectors in the destination.
     #[inline(always)]
     pub fn len(&self) -> usize {
@@ -135,23 +219,30 @@ impl<S: Simd, V: NtStore<S>> NtWriter<'_, S, V> {
         self.len == 0
     }
 
-    /// Stream `v` into slot `i`. Panics if `i >= len`.
+    /// Split into writers for `[0, mid)` and `[mid, len)`. Panics if `mid > len`.
     #[inline(always)]
-    pub fn store(&mut self, i: usize, v: V) {
-        assert!(i < self.len, "NtWriter::store: index {i} out of range for {} vectors", self.len);
-        // SAFETY: in bounds; `ptr` came from a `&mut [V]`, so it's aligned; the scope fences.
-        unsafe { v.stream(self.ptr.add(i)) }
+    pub fn split_at(self, mid: usize) -> (Self, Self) {
+        assert!(mid <= self.len, "NtWriter::split_at: {mid} out of range for {} vectors", self.len);
+        // SAFETY: mid <= len, so both halves are inside the destination and disjoint.
+        let right = unsafe { self.ptr.add(mid) };
+        (
+            Self { ptr: self.ptr, len: mid, _scope: PhantomData },
+            Self { ptr: right, len: self.len - mid, _scope: PhantomData },
+        )
     }
 
     /// Stream `f(i)` into every slot, in increasing `i`, 4 stores per iteration. `f` is called
     /// exactly once per slot in order, so it may keep state (e.g. an index vector it advances).
     #[inline(always)]
-    pub fn fill_with(&mut self, mut f: impl FnMut(usize) -> V) {
+    pub fn fill_with(self, mut f: impl FnMut(usize) -> V) {
         let (p, n) = (self.ptr, self.len);
+        // A precomputed bound (not `i + 4 <= n`) keeps one induction variable in the loop.
+        let end4 = n & !3;
         let mut i = 0;
-        while i + 4 <= n {
+        while i < end4 {
             let (v0, v1, v2, v3) = (f(i), f(i + 1), f(i + 2), f(i + 3));
-            // SAFETY: i + 3 < n; see `store`.
+            // SAFETY: i + 3 < n; `ptr` came from a `&mut [V]`, so it's aligned; each slot is
+            // written once; the scope fences.
             unsafe {
                 v0.stream(p.add(i));
                 v1.stream(p.add(i + 1));
@@ -161,21 +252,30 @@ impl<S: Simd, V: NtStore<S>> NtWriter<'_, S, V> {
             i += 4;
         }
         while i < n {
-            // SAFETY: i < n; see `store`.
+            // SAFETY: i < n; as above.
             unsafe { f(i).stream(p.add(i)) };
             i += 1;
         }
     }
 
-    /// The destination as write-only slots, in order (a pointer walk).
+    /// The destination as write-once slots, in order (a pointer walk).
     #[inline(always)]
-    pub fn slots(&mut self) -> NtSlots<'_, S, V> {
-        // SAFETY: `ptr..ptr+len` is the borrowed destination.
+    pub fn into_slots(self) -> NtSlots<'a, S, V> {
+        // SAFETY: `ptr..ptr+len` is this writer's part of the destination.
         NtSlots { cur: self.ptr, end: unsafe { self.ptr.add(self.len) }, _w: PhantomData }
     }
 }
 
-/// Iterator over the write-only slots of an [`NtWriter`].
+impl<'a, S: Simd, V: NtStore<S>> IntoIterator for NtWriter<'a, S, V> {
+    type Item = NtSlot<'a, S, V>;
+    type IntoIter = NtSlots<'a, S, V>;
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_slots()
+    }
+}
+
+/// Iterator over the write-once slots of an [`NtWriter`].
 pub struct NtSlots<'w, S: Simd, V> {
     cur: *mut V,
     end: *mut V,
@@ -204,7 +304,7 @@ impl<'w, S: Simd, V: NtStore<S>> Iterator for NtSlots<'w, S, V> {
 
 impl<S: Simd, V: NtStore<S>> ExactSizeIterator for NtSlots<'_, S, V> {}
 
-/// One write-only destination slot: the only thing you can do with it is stream a vector in.
+/// One write-once destination slot: the only thing you can do with it is stream one vector in.
 pub struct NtSlot<'w, S: Simd, V> {
     ptr: *mut V,
     _w: PhantomData<(&'w mut V, S)>,
@@ -214,16 +314,17 @@ impl<S: Simd, V: NtStore<S>> NtSlot<'_, S, V> {
     /// Stream `v` into this slot.
     #[inline(always)]
     pub fn store(self, v: V) {
-        // SAFETY: the slot is an aligned element of the scope's destination; the scope fences.
+        // SAFETY: the slot is an aligned element of the scope's destination, written once (the
+        // slot is consumed); the scope fences.
         unsafe { v.stream(self.ptr) }
     }
 }
 
-/// Run `f` with write-only, non-temporal access to `dst`, then `SFENCE`. The fence also runs if
+/// Run `f` with write-once, non-temporal access to `dst`, then `SFENCE`. The fence also runs if
 /// `f` panics. `dst` stays mutably borrowed until the fence has run, so no code can read it with
-/// stores still in flight.
+/// stores still in flight; see the [module docs](self) for the full argument.
 #[inline(always)]
-pub fn nontemporal<S: Simd, V: NtStore<S>, R>(simd: S, dst: &mut [V], f: impl FnOnce(&mut NtWriter<'_, S, V>) -> R) -> R {
+pub fn nontemporal<S: Simd, V: NtStore<S>, R>(simd: S, dst: &mut [V], f: impl FnOnce(NtWriter<'_, S, V>) -> R) -> R {
     struct Fence;
     impl Drop for Fence {
         #[inline(always)]
@@ -233,6 +334,5 @@ pub fn nontemporal<S: Simd, V: NtStore<S>, R>(simd: S, dst: &mut [V], f: impl Fn
     }
     let _ = simd;
     let _fence = Fence;
-    let mut w = NtWriter { ptr: dst.as_mut_ptr(), len: dst.len(), _scope: PhantomData };
-    f(&mut w)
+    f(NtWriter { ptr: dst.as_mut_ptr(), len: dst.len(), _scope: PhantomData })
 }

@@ -32,10 +32,9 @@ pub fn has_movdir64b() -> bool {
 }
 
 /// The CLFLUSH line size, `CPUID.1:EBX[15:8]` x 8 bytes. That is the granularity CLFLUSH and
-/// CLFLUSHOPT operate on (64 on every current x86 CPU). Falls back to 64 if CPUID reports 0.
+/// CLFLUSHOPT operate on (64 on every current x86 CPU). The range flush masks addresses with it,
+/// so anything that isn't a power of two in 32..=4096 (0, or an odd hypervisor value) becomes 64.
 pub fn flush_line_bytes() -> usize {
-    match (cpuid(1, 0).ebx >> 8) & 0xff {
-        0 => 64,
-        n => n as usize * 8,
-    }
+    let bytes = ((cpuid(1, 0).ebx >> 8) & 0xff) as usize * 8;
+    if bytes.is_power_of_two() && (32..=4096).contains(&bytes) { bytes } else { 64 }
 }

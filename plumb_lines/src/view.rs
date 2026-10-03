@@ -53,20 +53,30 @@ pub fn as_vectors<S: Simd, V: SimdBase<S>>(simd: S, buf: &[V::Element]) -> (&[V:
     let head = head_len::<S, V>(ptr as usize, len);
     let n = (len - head) / V::LEN;
     let tail = head + n * V::LEN;
-    // An empty middle must still be an aligned slice: when `buf` is too short to reach an aligned
-    // address, `ptr + head` is not `V`-aligned, and `from_raw_parts` requires alignment even for
-    // length 0.
-    let mid: &[V] = if n == 0 {
-        &[]
-    } else {
-        // SAFETY: the middle starts `V`-aligned (head_len) and holds `n` whole vectors inside
-        // `buf`; `V` has the layout of `[Element; LEN]` (Layout::OK), every bit pattern of the
-        // element type is a valid element (fearless element types are integers and floats), and
-        // the zero-sized token is backed by `simd`.
-        unsafe { slice::from_raw_parts(ptr.add(head) as *const V, n) }
-    };
-    // SAFETY: head and tail are disjoint sub-ranges of `buf` around the middle.
-    unsafe { (slice::from_raw_parts(ptr, head), mid, slice::from_raw_parts(ptr.add(tail), len - tail)) }
+    let mid = align_up::<V>(ptr.wrapping_add(head).cast::<V>());
+    // SAFETY: when n > 0 the middle starts `V`-aligned at `ptr + head` (head_len; align_up is
+    // then the identity) and holds `n` whole vectors inside `buf`. When n == 0 it is a non-null,
+    // aligned, zero-length slice. `V` has the layout of `[Element; LEN]` (Layout::OK), every bit
+    // pattern of the element type is a valid element (fearless element types are integers and
+    // floats), and the zero-sized token is backed by `simd`. Head and tail are the disjoint
+    // sub-ranges of `buf` around the middle.
+    unsafe {
+        (
+            slice::from_raw_parts(ptr, head),
+            slice::from_raw_parts(mid, n),
+            slice::from_raw_parts(ptr.add(tail), len - tail),
+        )
+    }
+}
+
+/// Round `p` up to `T`'s alignment, keeping its provenance. Identity for aligned pointers. Used so
+/// an empty middle is still an aligned slice (`from_raw_parts` requires that even for length 0;
+/// a too-short `buf` leaves `ptr + head` unaligned) without a branch, which would stop LLVM from
+/// unrolling loops over the middle.
+#[inline(always)]
+fn align_up<T>(p: *const T) -> *const T {
+    let a = align_of::<T>();
+    p.map_addr(|addr| (addr + a - 1) & !(a - 1))
 }
 
 /// Mutable version of [`as_vectors`].
@@ -82,14 +92,15 @@ pub fn as_vectors_mut<S: Simd, V: SimdBase<S>>(
     let head = head_len::<S, V>(ptr as usize, len);
     let n = (len - head) / V::LEN;
     let tail = head + n * V::LEN;
-    // See `as_vectors`: an empty middle must still be aligned.
-    let mid: &mut [V] = if n == 0 {
-        &mut []
-    } else {
-        // SAFETY: as in `as_vectors`; any element values written through `&mut V` are valid.
-        unsafe { slice::from_raw_parts_mut(ptr.add(head) as *mut V, n) }
-    };
-    // SAFETY: the three ranges are disjoint sub-ranges of `buf`, so the mutable borrows don't
-    // alias.
-    unsafe { (slice::from_raw_parts_mut(ptr, head), mid, slice::from_raw_parts_mut(ptr.add(tail), len - tail)) }
+    let mid = align_up::<V>(ptr.wrapping_add(head).cast::<V>().cast_const()).cast_mut();
+    // SAFETY: as in `as_vectors`. The three ranges are disjoint (an empty middle covers no
+    // bytes), so the mutable borrows don't alias, and any element values written through
+    // `&mut V` are valid elements.
+    unsafe {
+        (
+            slice::from_raw_parts_mut(ptr, head),
+            slice::from_raw_parts_mut(mid, n),
+            slice::from_raw_parts_mut(ptr.add(tail), len - tail),
+        )
+    }
 }

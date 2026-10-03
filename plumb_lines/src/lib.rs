@@ -12,12 +12,14 @@
 //! # Why scopes take closures
 //!
 //! NT stores and MOVDIR64B are weakly ordered. stdarch's contract for them is that the writing
-//! thread must `SFENCE` before any other access to the memory they wrote, and Rust's own fences
-//! don't provide that (`fence(Release)` emits nothing on x86; `fence(SeqCst)` emits a locked
+//! thread must `SFENCE` before any other access to the memory they wrote (reads and writes,
+//! including another streaming store) and before handing it to another thread, and Rust's own
+//! fences don't provide that (`fence(Release)` emits nothing on x86; `fence(SeqCst)` emits a locked
 //! `or`). So the scopes borrow the destination mutably and run the fence when they end:
-//! nothing can read the memory until it has run. It has to be a closure, as in
+//! nothing can touch the memory until it has run. It has to be a closure, as in
 //! `std::thread::scope`, not a guard object: `mem::forget` on a guard would end the borrow
-//! without the fence. Inside the scope, writers hand out write-only access.
+//! without the fence. Inside the scope the writer is passed by value and is write-once and
+//! `!Send`: each slot is stored at most once, never read, and only from this thread.
 //!
 //! The flush scope is different in kind. Caches are coherent, so flushing is never needed for
 //! memory safety; it's what makes a verify read come from DRAM. That scope gives ordinary
@@ -54,10 +56,20 @@ pub mod flush;
 pub mod nt;
 pub mod view;
 
-pub use direct::{DirectWriter, Line, Movdir64b, as_lines, as_lines_mut, direct};
+pub use direct::{DirectSlot, DirectSlots, DirectWriter, Line, Movdir64b, as_lines, as_lines_mut, direct};
 pub use flush::{Clflushopt, flush_after};
-pub use nt::{NtBytes, NtSlot, NtStore, NtWriter, nontemporal};
+pub use nt::{NtBytes, NtSlot, NtSlots, NtStore, NtWriter, nontemporal};
 pub use view::{as_vectors, as_vectors_mut};
+
+/// fearless_simd, re-exported for `with_clflushopt!`: the macro must name the real proof tokens
+/// through `$crate`, never through whatever `fearless_simd` means at the call site.
+#[doc(hidden)]
+pub use fearless_simd as __fearless_simd;
+
+/// The README's example, compiled and run as a doctest.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
 
 /// `SFENCE`: orders this thread's earlier stores, including non-temporal and direct stores,
 /// before its later stores.

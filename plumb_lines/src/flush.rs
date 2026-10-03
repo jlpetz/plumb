@@ -12,9 +12,10 @@
 //! CLFLUSHOPT isn't part of any x86-64 psABI level, so it isn't in any fearless_simd token; it's
 //! a separate capability ([`Clflushopt`]). On stable it is emitted with `asm!`, which needs no
 //! target feature and inlines into any function. With the `nightly` feature the range flush uses
-//! the stdarch intrinsic inside a `clflushopt` target-feature function (same instruction; LLVM
-//! may unroll the loop). The per-line [`Clflushopt::flush_line`] stays `asm!` on both, so it
-//! inlines inside fearless kernels; for the intrinsic there, see `with_clflushopt!`.
+//! the stdarch intrinsic inside a `clflushopt` target-feature function (same instruction). The
+//! per-line [`Clflushopt::flush_line`] stays `asm!` on both, so it inlines inside fearless
+//! kernels (unroll hot loops around it by hand; see its docs); for the intrinsic there, see
+//! `with_clflushopt!`.
 
 /// Proof that the CPU has CLFLUSHOPT, plus its flush line size.
 #[derive(Clone, Copy, Debug)]
@@ -23,7 +24,8 @@ pub struct Clflushopt {
 }
 
 impl Clflushopt {
-    /// Detect CLFLUSHOPT (`CPUID.(EAX=7,ECX=0):EBX[23]`) and read the flush line size.
+    /// Detect CLFLUSHOPT (`CPUID.(EAX=7,ECX=0):EBX[23]`) and read the flush line size (a power of
+    /// two in 32..=4096; anything else CPUID reports, e.g. from an odd hypervisor, becomes 64).
     pub fn try_new() -> Option<Self> {
         crate::cpu::has_clflushopt().then(|| Self { line: crate::cpu::flush_line_bytes() as u16 })
     }
@@ -42,11 +44,24 @@ impl Clflushopt {
         self.line as usize
     }
 
-    /// CLFLUSHOPT the cache line containing the start of `x`. No fence: call
-    /// [`crate::mfence`] before reads that must miss, or use [`Self::flush`].
+    /// CLFLUSHOPT the cache line containing the start of `x`; nothing for a zero-sized `x`. No
+    /// fence: call [`crate::mfence`] before reads that must miss, or use [`Self::flush`].
+    ///
+    /// In a hot loop, unroll by hand. This is `asm!`, and LLVM's runtime unroller won't unroll a
+    /// loop containing inline asm (it counts as a call), so `for line in lines { ..;
+    /// cf.flush_line(line) }` runs one line per iteration. Iterating `lines.as_chunks_mut::<4>()`
+    /// and flushing each line of the chunk gives the unrolled loop. Each flush still costs a
+    /// `lea`, because an `asm!` address is a register operand and can't take a displacement
+    /// (the intrinsic's `[r9 - 448]`). The range flushes ([`Self::flush`], [`flush_after`]) are
+    /// unrolled with displacements already.
     #[inline(always)]
     pub fn flush_line<T: ?Sized>(self, x: &T) {
-        // SAFETY: `self` proves CLFLUSHOPT; the address is that of a live reference.
+        // A zero-sized referent (`&()`, an empty slice) can have a dangling address such as 0x1
+        // or 0x8, and CLFLUSHOPT faults on unmapped memory. For sized types this folds away.
+        if core::mem::size_of_val(x) == 0 {
+            return;
+        }
+        // SAFETY: `self` proves CLFLUSHOPT; `x` has at least one byte, so its address is mapped.
         unsafe { clflushopt_asm(x as *const T as *const u8) }
     }
 
@@ -78,9 +93,17 @@ impl Clflushopt {
         let start = (ptr as usize) & !(line - 1);
         let end = ptr as usize + bytes;
         let lines = (end - start).div_ceil(line);
+        let first = ptr.wrapping_sub(ptr as usize - start);
         // SAFETY: `self` proves CLFLUSHOPT; every flushed line overlaps the mapped range. The
-        // first line starts below `ptr` (in the same line, so the same page) by design.
-        unsafe { flush_lines(ptr.wrapping_sub(ptr as usize - start), lines, line) }
+        // first line starts below `ptr` (in the same line, so the same page) by design. The
+        // common 64-byte line gets a constant stride (TMR's addressing); others the general loop.
+        unsafe {
+            if line == 64 {
+                flush_lines_64(first, lines)
+            } else {
+                flush_lines(first, lines, line)
+            }
+        }
     }
 }
 
@@ -121,30 +144,91 @@ pub(crate) unsafe fn clflushopt_asm(p: *const u8) {
     unsafe { core::arch::asm!("clflushopt [{}]", in(reg) p, options(nostack, preserves_flags)) }
 }
 
-/// `lines` CLFLUSHOPTs from `start`, `line` bytes apart.
+/// Eight CLFLUSHOPTs 64 bytes apart in one `asm!` block, so the offsets are displacements. One
+/// `asm!` per line would need each address in a register (a `lea` per line).
 ///
 /// # Safety
-/// CLFLUSHOPT must be supported and every line must be mapped.
+/// CLFLUSHOPT must be supported and all eight lines must be mapped.
 #[cfg(not(feature = "nightly"))]
 #[inline(always)]
-unsafe fn flush_lines(start: *const u8, lines: usize, line: usize) {
-    for i in 0..lines {
-        // SAFETY: forwarded.
-        unsafe { clflushopt_asm(start.wrapping_add(i * line)) }
+unsafe fn clflushopt8_64(p: *const u8) {
+    // SAFETY: forwarded. No `nomem`/`readonly`, as in `clflushopt_asm`.
+    unsafe {
+        core::arch::asm!(
+            "clflushopt [{p}]",
+            "clflushopt [{p} + 64]",
+            "clflushopt [{p} + 128]",
+            "clflushopt [{p} + 192]",
+            "clflushopt [{p} + 256]",
+            "clflushopt [{p} + 320]",
+            "clflushopt [{p} + 384]",
+            "clflushopt [{p} + 448]",
+            p = in(reg) p,
+            options(nostack, preserves_flags),
+        )
     }
 }
 
-/// Nightly: the stdarch intrinsic in a `clflushopt` function, so it inlines and LLVM can unroll
-/// the loop (TMR's `flush_range_to_dram`). One call per range, never per line.
+/// The nightly twin of `clflushopt8_64`: constant offsets, which LLVM folds into displacements.
 ///
 /// # Safety
-/// As the stable version.
+/// As `clflushopt8_64`.
 #[cfg(feature = "nightly")]
 #[inline]
 #[target_feature(enable = "clflushopt")]
-unsafe fn flush_lines(start: *const u8, lines: usize, line: usize) {
-    for i in 0..lines {
+unsafe fn clflushopt8_64(p: *const u8) {
+    for k in 0..8 {
         // SAFETY: forwarded; the target feature is enabled on this fn.
-        unsafe { core::arch::x86_64::_mm_clflushopt(start.wrapping_add(i * line)) }
+        unsafe { core::arch::x86_64::_mm_clflushopt(p.wrapping_add(k * 64)) }
     }
 }
+
+/// The flush loops: `lines` CLFLUSHOPTs from `start`, `line` (or 64) bytes apart. Stable: `asm!`,
+/// inlined into the caller. Nightly: the stdarch intrinsic in a `clflushopt` function, so it
+/// inlines there (TMR's `flush_range_to_dram`); one call per range, never per line, and a
+/// separate 64-byte function because a constant argument to an out-of-line function isn't
+/// specialised. Both are unrolled 8x by hand: LLVM won't runtime-unroll a loop around `asm!`.
+/// The general-stride loop is for line sizes other than 64, which no current x86 CPU reports.
+///
+/// Safety (both functions): CLFLUSHOPT must be supported and every line must be mapped.
+macro_rules! flush_loops {
+    ($($attr:meta),*; $flush:path) => {
+        $(#[$attr])*
+        unsafe fn flush_lines(start: *const u8, lines: usize, line: usize) {
+            let end8 = lines & !7;
+            let mut i = 0;
+            while i < end8 {
+                for k in 0..8 {
+                    // SAFETY: forwarded.
+                    unsafe { $flush(start.wrapping_add((i + k) * line)) }
+                }
+                i += 8;
+            }
+            while i < lines {
+                // SAFETY: forwarded.
+                unsafe { $flush(start.wrapping_add(i * line)) }
+                i += 1;
+            }
+        }
+        $(#[$attr])*
+        unsafe fn flush_lines_64(start: *const u8, lines: usize) {
+            let end8 = lines & !7;
+            let mut i = 0;
+            while i < end8 {
+                // SAFETY: forwarded; lines i..i + 8 are all in the range.
+                unsafe { clflushopt8_64(start.wrapping_add(i * 64)) }
+                i += 8;
+            }
+            while i < lines {
+                // SAFETY: forwarded.
+                unsafe { $flush(start.wrapping_add(i * 64)) }
+                i += 1;
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "nightly"))]
+flush_loops!(inline(always); clflushopt_asm);
+#[cfg(feature = "nightly")]
+flush_loops!(inline, target_feature(enable = "clflushopt"); core::arch::x86_64::_mm_clflushopt);

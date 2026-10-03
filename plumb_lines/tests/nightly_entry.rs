@@ -64,3 +64,40 @@ fn copied_feature_lists_are_sound() {
         }
     }
 }
+
+/// fearless_simd's own `Avx2`/`Avx512` target-feature lists, read from the source of the
+/// fearless_simd 1.0.0 this crate builds against (located with `cargo metadata`).
+fn fearless_lists() -> Option<(String, String)> {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--offline"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()?;
+    let json = String::from_utf8(out.stdout).ok()?;
+    let key = "\"manifest_path\":\"";
+    let manifest = json
+        .match_indices(key)
+        .map(|(i, _)| {
+            let rest = &json[i + key.len()..];
+            &rest[..rest.find('"').unwrap_or(0)]
+        })
+        .find(|p| p.contains("fearless_simd-1.0.0"))?
+        .replace("\\\\", "\\");
+    let src = std::fs::read_to_string(std::path::Path::new(&manifest).parent()?.join("src").join("kernel_macros.rs")).ok()?;
+    let body = &src[src.find("macro_rules! __fearless_simd_kernel_target_fn")?..];
+    let list = |tok: &str| -> Option<String> {
+        let at = body.find(&format!("({tok}, $item:item)"))?;
+        let from = at + body[at..].find("enable = \"")? + "enable = \"".len();
+        Some(body[from..from + body[from..].find('"')?].to_string())
+    };
+    Some((list("Avx2")?, list("Avx512")?))
+}
+
+/// The real soundness condition: each copied list is exactly fearless_simd's list (what its token
+/// proves) plus `clflushopt` (what our token proves). Fails if a fearless upgrade changes a list.
+#[test]
+fn copied_lists_equal_fearless_simd_source() {
+    let (avx2, avx512) = fearless_lists().expect("couldn't locate fearless_simd 1.0.0's source via cargo metadata");
+    assert_eq!(AVX2_FEATURES, format!("{avx2},clflushopt"));
+    assert_eq!(AVX512_FEATURES, format!("{avx512},clflushopt"));
+}
