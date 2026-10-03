@@ -1,10 +1,17 @@
 {
-  "_comment": "Expectations for bench/src/lines.rs and tmrport.rs kernels (plumb_lines and the ported TMR tests). Width rules come from the _128/_256/_512 suffix rules in asm_check.py.",
+  "_comment": "Expectations for bench/src/lines.rs and tmrport.rs kernels (plumb_lines and the ported TMR tests). Width rules come from the _128/_256/_512 suffix rules in asm_check.py. Twins: each plumb-style kernel's innermost loops must be within 25% of its TMR-style twin in instructions per key memory op (load, store, nt, flush, movdir64b). loop_forbid: GPR<->vector moves and lane shuffles in a positional loop mean the index vector is being rebuilt every iteration (review finding F4).",
   "special": [],
   "expect": [
     ["^k_fillflush_", {"loop_need": ["clflushopt"], "need": ["mfence"]}],
     ["^k_fillmd_", {"loop_need": ["movdir64b"], "need": ["sfence"]}],
     ["^k_(sb|refresh)_", {"loop_need": ["clflushopt"], "need": ["mfence"]}],
-    ["^k_simplent_", {"loop_need": ["movntdq"], "need": ["sfence"]}]
+    ["^k_simplent_", {"loop_need": ["movntdq"], "need": ["sfence"]}],
+    ["^k_(posv|ntw|simplent)_", {"loop_forbid": ["vmovq", "vmovd", "vpextrq", "vpinsrq", "vpermt2q", "vpermq", "valignq", "vshufi64x2", "vinserti128", "vinserti64x4", "vextracti128", "vextracti64x4", "vpbroadcastq"]}],
+    ["^k_(fill|verify4|posv)_pv_(\\d+)$", {"twin": "k_\\1_tmr_\\2"}],
+    ["^k_(ntw|fillflush|sb|sbnf|refresh|simplent)_pl_(\\d+)$", {"twin": "k_\\1_tmr_\\2"}],
+    ["^k_wflush_pl(tok|entry)_(\\d+)$", {"twin": "k_wflush_tmr_\\2"}],
+    ["^k_(flush|copymd)_pl$", {"twin": "k_\\1_tmr"}],
+    ["^k_wflush_pltok_", {"twin_tol": 0.5, "_why": "per-line flush_line is asm!: its address is a register operand, so one lea per line that the intrinsic twin folds into a displacement (flush_line docs)"}],
+    ["^k_ntw_plplain_512$", {"known": "footgun on purpose: NT scope in a plain generic fn, no #[simd]; every op is a call"}]
   ]
 }

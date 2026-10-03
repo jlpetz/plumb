@@ -427,10 +427,10 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
 
         // Ported TMR tests (tmrport.rs). Throughput counts TMR's traffic: StuckBit 3 writes +
-        // 3 reads, Refresh and SimpleNT 1 + 1.
+        // 3 reads, Refresh 1 + 1, SimpleNT 4 x (1 write + 5 reads).
         gs.push(port_group("sb", "TMR StuckBit port, flush before verify (3 phases)", t, 6.0));
         gs.push(port_group("refresh", "TMR Refresh port, flush before verify (sleep omitted)", t, 2.0));
-        gs.push(port_group("simplent", "TMR SimpleNT port: NT positional write + verify", t, 2.0));
+        gs.push(port_group("simplent", "TMR SimpleNT port: 4 x (NT positional write, 5 verifies) per chunk", t, 24.0));
     }
     gs.push(port_group("sbnf", "TMR StuckBit port, no flush (3 phases)", t, 6.0));
     gs

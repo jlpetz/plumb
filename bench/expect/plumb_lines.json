@@ -1,0 +1,12 @@
+{
+  "_comment": "Expectations for plumb_lines/examples/asm_kernels.rs (the library's default, stable asm! paths): python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable. No TMR twins in that binary, so loop density is pinned with max_per_op at what the 2026-10 build gives (equal to TMR's twins where one exists in the bench: range flush 1.5 = flush_range_to_dram). Each asm! flush or NT store takes its address in a register (a lea), which is why the per-line wflush loop is looser than a range flush.",
+  "special": [],
+  "expect": [
+    ["^k_lines_flush$", {"loop_need": ["clflushopt"], "need": ["mfence"], "max_per_op": {"flush": 1.5}}],
+    ["^k_lines_fillflush_", {"loop_need": ["clflushopt"], "need": ["mfence"], "max_per_op": {"flush": 1.5, "store": 1.5}}],
+    ["^k_lines_ntfill_", {"loop_need": ["movntdq"], "need": ["sfence"], "max_per_op": {"nt": 2.75}}],
+    ["^k_lines_wflush_256$", {"loop_need": ["clflushopt"], "need": ["mfence"], "max_per_op": {"flush": 4.5, "store": 2.25}}],
+    ["^k_lines_wflush_512$", {"loop_need": ["clflushopt"], "need": ["mfence"], "max_per_op": {"flush": 3.5, "store": 3.5}}],
+    ["^k_lines_directfill$", {"loop_need": ["movdir64b"], "need": ["sfence"], "max_per_op": {"movdir64b": 4}}]
+  ]
+}

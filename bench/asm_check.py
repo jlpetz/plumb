@@ -18,7 +18,9 @@ Usage:
   python asm_check.py               # build the bench binary + table
   python asm_check.py --no-build    # reuse the last .s
   python asm_check.py --dump k_verify4_fs_512   # print that kernel's loops (and callees)
+  python asm_check.py --density     # also print instructions per key memory op (twin metric)
   python asm_check.py --package plumb_tiles --example asm_kernels   # check a crate's example
+  python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable
 Extra expectations and special instructions are loaded from expect/*.json (one file per
 module), so modules can be added without editing this script:
   {"special": ["tileloadd", ...], "expect": [["^k_tile_", {"loop_need": ["tileloadd"]}], ...]}
@@ -46,6 +48,13 @@ TARGET = os.path.join(ROOT, "target", "asm")
 #   canary:  byte-uniform fill; report whether it collapsed to memset, don't fail either way
 #   loop_calls_ok: True = calls inside loops are expected (the footgun variants)
 #   known:   expected to fail today, with the reason; not counted as a failure
+#   loop_forbid: mnemonics that must not appear in any innermost loop
+#   twin:    a re.sub template on the matched name giving the TMR-style twin kernel; for every
+#            key memory op kind in the twin's innermost loops (load, store, nt, flush, movdir64b)
+#            this kernel's best innermost loop may use at most `twin_tol` (default 0.25) more
+#            instructions per op
+#   max_per_op: {kind: n}: this kernel's best innermost loop may use at most n instructions per
+#            op of that kind (for kernels with no twin, e.g. plumb_lines' own example)
 # Default for every kernel: no memset/memcpy, and no calls or vector spills in innermost loops
 # (a call in an outer loop, like TMR's flush once per chunk, is fine).
 # --------------------------------------------------------------------------------------------
@@ -103,18 +112,22 @@ def target_spec(args):
     return ["-p", pkg, "--bin", pkg], pkg.replace("-", "_")
 
 
-def build(cargo_target):
+def build(cargo_target, toolchain=None):
     env = dict(os.environ, CARGO_TARGET_DIR=TARGET)
-    cmd = (["cargo", "rustc", "--release"] + cargo_target +
+    cmd = (["cargo"] + ([f"+{toolchain}"] if toolchain else []) + ["rustc", "--release"] + cargo_target +
            ["--", "--emit", "asm", "-C", "llvm-args=-x86-asm-syntax=intel"])
     print("building:", " ".join(cmd), file=sys.stderr)
     subprocess.run(cmd, cwd=ROOT, env=env, check=True)
 
 
-def latest_s(stem):
+def latest_s(stem, pkg=None):
     # Older cargo: release/deps/<stem>-HASH.s (examples: release/examples/); newer build-dir
-    # layout: release/build/<pkg>/HASH/out/<stem>.s.
+    # layout: release/build/<pkg>/HASH/out/<stem>.s. Two packages can have an example of the same
+    # name, so prefer files under the package's own build dir.
     files = glob.glob(os.path.join(TARGET, "release", "**", f"{stem}*.s"), recursive=True)
+    if pkg:
+        own = [f for f in files if os.sep + pkg + os.sep in f]
+        files = own or files
     if not files:
         sys.exit(f"no {stem}*.s found; run without --no-build")
     return max(files, key=os.path.getmtime)
@@ -211,18 +224,138 @@ def instrs(lines):
     return out
 
 
-def loops(ins):
-    """Index ranges [start, end] of backward-branch loops (label .. jump back to it)."""
-    pos = {}
-    res = []
+def blocks(ins):
+    """Basic blocks as (start, end) index pairs (end inclusive) and their successor lists.
+    A block starts at a label or after a jump/ret/ud2; `call` doesn't end one."""
+    bl, cur = [], None
     for i, (lab, txt) in enumerate(ins):
-        if lab:
-            pos[lab] = i
-        elif txt:
-            m = re.match(r"^j\w*\s+(\S+)$", txt)
-            if m and m.group(1) in pos and pos[m.group(1)] < i:
-                res.append((pos[m.group(1)], i))
+        if lab is not None:
+            if cur is not None:
+                bl.append((cur, i - 1))
+            cur = i
+            continue
+        if cur is None:
+            cur = i
+        op = txt.split()[0] if txt else ""
+        if op.startswith("j") or op in ("ret", "ud2", "int3"):
+            bl.append((cur, i))
+            cur = None
+    if cur is not None:
+        bl.append((cur, len(ins) - 1))
+    at = {ins[a][0]: k for k, (a, _) in enumerate(bl) if ins[a][0] is not None}
+    succ = []
+    for k, (_, b) in enumerate(bl):
+        txt = ins[b][1] or ""
+        op = txt.split()[0] if txt else ""
+        nxt = [k + 1] if k + 1 < len(bl) else []
+        m = re.match(r"^j\w*\s+(\S+)$", txt)
+        tgt = [at[m.group(1)]] if m and m.group(1) in at else []
+        if op == "jmp":
+            succ.append(tgt)  # a non-local target is a tail call: no successor here
+        elif op.startswith("j"):
+            succ.append(tgt + nxt)
+        elif op in ("ret", "ud2", "int3"):
+            succ.append([])
+        else:
+            succ.append(nxt)
+    return bl, succ
+
+
+def loops(ins):
+    """Loops as (sorted instruction indices, innermost) pairs: a loop-nesting forest from
+    recursive SCC decomposition of the block graph. Each strongly connected component with a cycle
+    is a loop; cutting the edges into its entry blocks from inside it exposes the nested loops.
+    This needs no dominators, so a guard that jumps into the middle of a rotated loop (LLVM does)
+    doesn't make the inner loop swallow the outer one, and a backward branch whose target can't
+    get back to it (block layout, e.g. into a block that falls through to `ret`) isn't a loop."""
+    bl, succ = blocks(ins)
+    pred = [[] for _ in bl]
+    for k, ss in enumerate(succ):
+        for t in ss:
+            pred[t].append(k)
+
+    def sccs(nodes, cut):
+        """Tarjan, iterative, over `nodes` without the `cut` edges."""
+        index, low, on, st, out, n = {}, {}, set(), [], [], [0]
+        for root in sorted(nodes):
+            if root in index:
+                continue
+            work = [(root, iter(succ[root]))]
+            index[root] = low[root] = n[0]
+            n[0] += 1
+            st.append(root)
+            on.add(root)
+            while work:
+                v, it = work[-1]
+                for w in it:
+                    if w not in nodes or (v, w) in cut:
+                        continue
+                    if w not in index:
+                        index[w] = low[w] = n[0]
+                        n[0] += 1
+                        st.append(w)
+                        on.add(w)
+                        work.append((w, iter(succ[w])))
+                        break
+                    if w in on:
+                        low[v] = min(low[v], index[w])
+                else:
+                    work.pop()
+                    if work:
+                        low[work[-1][0]] = min(low[work[-1][0]], low[v])
+                    if low[v] == index[v]:
+                        comp = set()
+                        while True:
+                            w = st.pop()
+                            on.discard(w)
+                            comp.add(w)
+                            if w == v:
+                                break
+                        out.append(comp)
+        return out
+
+    res = []
+
+    def nest(nodes, cut):
+        found = False
+        for comp in sccs(nodes, cut):
+            if len(comp) == 1:
+                (v,) = comp
+                if v not in succ[v] or (v, v) in cut:
+                    continue
+            found = True
+            entries = [v for v in comp if any(p not in comp for p in pred[v])] or [min(comp)]
+            inner_cut = cut | {(p, e) for e in entries for p in pred[e] if p in comp}
+            has_child = nest(comp, inner_cut)
+            idx = sorted(i for k in comp for i in range(bl[k][0], bl[k][1] + 1))
+            res.append((idx, not has_child))
+        return found
+
+    nest(set(range(len(bl))), frozenset())
     return res
+
+
+# Key memory ops per kind, for the twin density comparison.
+NT_OPS = ("movntdq", "vmovntdq", "movnti", "movntps", "vmovntps", "movntpd", "vmovntpd")
+FLUSH_OPS = ("clflushopt", "clflush", "clwb")
+
+
+def mem_kind(txt):
+    """The key memory op an instruction is ('nt', 'store', 'load', 'flush', 'movdir64b'), or None.
+    Stack ([rsp]) and constant ([rip]) operands don't count: they're overhead, not traffic."""
+    op = txt.split()[0]
+    if op in NT_OPS:
+        return "nt"
+    if op in FLUSH_OPS:
+        return "flush"
+    if op == "movdir64b":
+        return "movdir64b"
+    ops = txt[len(op):].split(",")
+    if "ptr [" not in txt or "[rsp" in txt or "[rip" in txt or not re.search(r"\b[xyz]mm\d+\b", txt):
+        return None
+    if "ptr [" in ops[0] and op.startswith(("vmov", "mov")):
+        return "store"
+    return "load"
 
 
 def call_targets(txt, funcs):
@@ -255,34 +388,40 @@ def closure(name, funcs, depth=4):
 def analyse(name, funcs):
     fset = closure(name, funcs)
     rep = {"funcs": fset, "loop_regs": set(), "special": {}, "loop_special": set(),
-           "loop_calls": set(), "libcalls": set(), "spills": 0, "nloops": 0, "loop_text": [], "loop_sizes": []}
+           "loop_calls": set(), "libcalls": set(), "spills": 0, "nloops": 0, "loop_text": [], "loop_sizes": [],
+           "density": {}, "loop_ops": set()}
     for f in fset:
         ins = instrs(funcs[f])
         lps = loops(ins)
         rep["nloops"] += len(lps)
         in_loop = set()
-        for a, b in lps:
-            in_loop.update(range(a, b + 1))
-            body = [t for _, t in ins[a:b + 1] if t and not t.startswith("#")]
+        for lp, _ in lps:
+            in_loop.update(lp)
+            body = [ins[i][1] for i in lp if ins[i][1] and not ins[i][1].startswith("#")]
             rep["loop_text"].append((f, body))
             rep["loop_sizes"].append(len(body))
         # Innermost loops contain no other loop. A call there costs per element (the failure
         # this gate exists for); a call in an outer loop, e.g. TMR's flush once per chunk, doesn't.
+        # Exit blocks (ending in ret) can't reach a latch, so they're never in a loop and their
+        # stack traffic (the Windows x64 xmm6-15 restore) isn't counted as spills.
         inner = set()
-        for a, b in lps:
-            if not any(a <= c and d <= b and (c, d) != (a, b) for c, d in lps):
-                inner.update(range(a, b + 1))
-        # Blocks that end in `ret` are exits, never loop iterations, even when a backward branch
-        # to a shared exit makes them look like part of a loop. Their stack traffic is the
-        # epilogue (Windows x64 restores callee-saved xmm6-15 there), not spills.
-        exits = set()
-        for r, (_, txt) in enumerate(ins):
-            if txt and txt.split()[0] == "ret":
-                j = r
-                while j >= 0 and ins[j][0] is None and not (ins[j][1] or "").startswith("j"):
-                    exits.add(j)
-                    j -= 1
-        inner -= exits
+        for lp, innermost in lps:
+            if innermost:
+                inner.update(lp)
+                # Twin density: instructions per key memory op of each kind in this loop; the
+                # kernel's figure is its densest innermost loop for that kind.
+                body = [ins[i][1] for i in sorted(lp) if ins[i][1] and not ins[i][1].startswith("#")]
+                counts = {}
+                for t in body:
+                    kd = mem_kind(t)
+                    if kd:
+                        counts[kd] = counts.get(kd, 0) + 1
+                for kd, c in counts.items():
+                    d = len(body) / c
+                    rep["density"][kd] = min(rep["density"].get(kd, d), d)
+        for i in inner:
+            if ins[i][1]:
+                rep["loop_ops"].add(ins[i][1].split()[0])
         for i, (_, txt) in enumerate(ins):
             if not txt:
                 continue
@@ -316,11 +455,13 @@ def widest(regs):
     return "-"
 
 
-def check(name, rep):
+def check(name, rep, reps=None):
     exp = {}
     for pat, e in EXPECT:
         if re.search(pat, name):
             exp.update(e)
+            if "twin" in e:
+                exp["twin"] = re.sub(pat, e["twin"], name)
     fails = []
     if exp.get("canary"):
         return (["NOTE: collapsed to memset (the known trap)"] if rep["libcalls"]
@@ -344,6 +485,29 @@ def check(name, rep):
             fails.append(f"{n} not in a loop")
     if "need_any" in exp and not any(n in rep["special"] for n in exp["need_any"]):
         fails.append("missing " + "/".join(exp["need_any"]))
+    for kd, mx in sorted(exp.get("max_per_op", {}).items()):
+        d = rep["density"].get(kd)
+        if d is None:
+            fails.append(f"no {kd} loop")
+        elif d > mx + 1e-9:
+            fails.append(f"{kd} {d:.2f} instrs/op > {mx}")
+    bad = sorted(rep["loop_ops"] & set(exp.get("loop_forbid", [])))
+    if bad:
+        fails.append("in innermost loop: " + ",".join(bad))
+    # Twin: per key memory op kind the TMR-style twin has, this kernel's densest innermost loop
+    # must be within `twin_tol` (default 25%) of the twin's instructions per op.
+    if "twin" in exp and reps is not None:
+        twin = reps.get(exp["twin"])
+        if twin is None:
+            fails.append(f"twin {exp['twin']} not found")
+        else:
+            tol = exp.get("twin_tol", 0.25)
+            for kd, td in sorted(twin["density"].items()):
+                d = rep["density"].get(kd)
+                if d is None:
+                    fails.append(f"no {kd} loop (twin {td:.2f}/op)")
+                elif d > td * (1 + tol) + 1e-9:
+                    fails.append(f"{kd} {d:.2f} instrs/op vs twin {td:.2f}")
     return fails
 
 
@@ -351,9 +515,10 @@ def main():
     args = sys.argv[1:]
     load_expect_files()
     cargo_target, stem = target_spec(args)
+    toolchain = args[args.index("--toolchain") + 1] if "--toolchain" in args else None
     if "--no-build" not in args:
-        build(cargo_target)
-    path = latest_s(stem)
+        build(cargo_target, toolchain)
+    path = latest_s(stem, cargo_target[1])
     funcs = parse(path)
     kernels = sorted(n for n in funcs if n.startswith("k_"))
     if "--dump" in args:
@@ -371,13 +536,14 @@ def main():
     print(hdr)
     print("-" * len(hdr))
     nfail = 0
+    reps = {k: analyse(k, funcs) for k in kernels}
     for k in kernels:
-        rep = analyse(k, funcs)
+        rep = reps[k]
         sp = " ".join(f"{s}{'*' if s in rep['loop_special'] else ''}x{c}"
                       for s, c in sorted(rep["special"].items()))
         calls = sorted(rep["loop_calls"] | rep["libcalls"])
         calls_s = ", ".join(c.split("::")[-1] if "::" in c else c for c in calls)
-        fails = check(k, rep)
+        fails = check(k, rep, reps)
         known = next((e["known"] for p, e in EXPECT if "known" in e and re.search(p, k)), None)
         if fails and fails[0].startswith("NOTE"):
             verdict = fails[0]
@@ -389,6 +555,8 @@ def main():
         sizes = ",".join(str(n) for n in sorted(rep["loop_sizes"], reverse=True)) or "-"
         print(f"{k:<24} {widest(rep['loop_regs']):<5} {sizes[:12]:<12} {rep['spills']:>5}  "
               f"{sp[:40]:<40} {calls_s[:26]:<26} {verdict}")
+        if "--density" in args and rep["density"]:
+            print(f"{'':<24} instrs/op: " + " ".join(f"{kd} {d:.2f}" for kd, d in sorted(rep["density"].items())))
     print(f"\n{len(kernels) - nfail}/{len(kernels)} kernels match expectations")
     return 1 if nfail else 0
 

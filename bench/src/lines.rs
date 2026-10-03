@@ -13,7 +13,9 @@ use plumb_lines::{Clflushopt, Line, Movdir64b, NtStore};
 // Generic bodies
 // ---------------------------------------------------------------------------------------------
 
-/// Constant fill through the aligned view: `for v in vectors { *v = p }`, scalar head/tail.
+/// Constant fill through the aligned view, 8 vectors per iteration (TMR's unroll), scalar
+/// head/tail. Unrolled by hand: a plain `for v in mid { *v = p }` unrolls standalone but ran one
+/// store per iteration once inlined into the StuckBit port at 512 bits (asm_check twin rule).
 #[simd]
 pub fn fill_view<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &mut [u64], pat: u64) {
     let (head, mid, tail) = plumb_lines::as_vectors_mut::<S, V>(simd, buf);
@@ -22,7 +24,11 @@ pub fn fill_view<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &mut [u64]
     // auto-vectorising them wider than the variant's width.
     head.iter_mut().take(V::LEN - 1).for_each(|w| *w = pat);
     let p = V::splat(simd, pat);
-    for v in mid.iter_mut() {
+    let (eights, rest) = mid.as_chunks_mut::<8>();
+    for e in eights {
+        *e = [p; 8];
+    }
+    for v in rest {
         *v = p;
     }
     tail.iter_mut().take(V::LEN - 1).for_each(|w| *w = pat);
@@ -61,7 +67,9 @@ pub fn pos_verify_view_at<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &
     let base_v = V::splat(simd, base);
     let step = V::splat(simd, V::LEN as u64);
     let h = start + head.len() as u64;
-    let mut idx = V::from_fn(simd, |i| h + i as u64);
+    // TMR's shape, splat(start) + lane offsets. A runtime base inside from_fn made LLVM rebuild
+    // the index vector through GPRs every iteration at 512 bits.
+    let mut idx = V::splat(simd, h) + V::from_fn(simd, |i| i as u64);
     let mut acc = z;
     for &v in mid {
         acc |= v ^ (idx ^ base_v);
@@ -87,7 +95,7 @@ pub fn ntw_scope_at<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(simd: S,
     plumb_lines::nontemporal(simd, mid, |w| {
         let base_v = V::splat(simd, base);
         let step = V::splat(simd, V::LEN as u64);
-        let mut idx = V::from_fn(simd, |i| h + i as u64);
+        let mut idx = V::splat(simd, h) + V::from_fn(simd, |i| i as u64);
         w.fill_with(|_| {
             let v = idx ^ base_v;
             idx += step;
@@ -103,10 +111,23 @@ pub fn ntw_scope_at<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(simd: S,
 #[simd]
 pub fn wflush_token<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, cf: Clflushopt, buf: &mut [u64], pat: u64) {
     let (head, lines, tail) = plumb_lines::as_lines_mut(buf);
-    head.fill(pat);
-    tail.fill(pat);
+    // Partial head/tail lines (< 8 words): written and flushed too, so nothing stays cached.
+    head.iter_mut().take(7).for_each(|w| *w = pat);
+    tail.iter_mut().take(7).for_each(|w| *w = pat);
+    cf.flush_no_fence(head);
+    cf.flush_no_fence(tail);
     let p = V::splat(simd, pat);
-    for line in lines.iter_mut() {
+    // Four lines per iteration: LLVM won't runtime-unroll a loop around `asm!` (flush_line docs).
+    let (quads, rest) = lines.as_chunks_mut::<4>();
+    for quad in quads {
+        for line in quad {
+            for c in line.0.chunks_exact_mut(V::LEN) {
+                p.store_slice(c);
+            }
+            cf.flush_line(line);
+        }
+    }
+    for line in rest {
         for c in line.0.chunks_exact_mut(V::LEN) {
             p.store_slice(c);
         }
@@ -117,16 +138,18 @@ pub fn wflush_token<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, cf: Clflusho
 
 /// Same mixed loop with the stdarch intrinsic, for the `with_clflushopt!` entry (nightly).
 #[inline(always)]
-fn wflush_intrinsic<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, _cf: Clflushopt, buf: &mut [u64], pat: u64) {
+fn wflush_intrinsic<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, cf: Clflushopt, buf: &mut [u64], pat: u64) {
     let (head, lines, tail) = plumb_lines::as_lines_mut(buf);
-    head.fill(pat);
-    tail.fill(pat);
+    head.iter_mut().take(7).for_each(|w| *w = pat);
+    tail.iter_mut().take(7).for_each(|w| *w = pat);
+    cf.flush_no_fence(head);
+    cf.flush_no_fence(tail);
     let p = V::splat(simd, pat);
     for line in lines.iter_mut() {
         for c in line.0.chunks_exact_mut(V::LEN) {
             p.store_slice(c);
         }
-        // SAFETY: `line` is inside `buf`; the entry enables clflushopt and `_cf` proves it.
+        // SAFETY: `line` is inside `buf`; the entry enables clflushopt and `cf` proves it.
         unsafe { core::arch::x86_64::_mm_clflushopt(line as *const Line as *const u8) };
     }
     plumb_lines::mfence();
@@ -134,6 +157,24 @@ fn wflush_intrinsic<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, _cf: Clflush
 
 plumb_lines::with_clflushopt!(avx2, fn wflush_entry256 = wflush_intrinsic::<Avx2, u64x4<Avx2>>, (buf: &mut [u64], pat: u64));
 plumb_lines::with_clflushopt!(avx512, fn wflush_entry512 = wflush_intrinsic::<Avx512, u64x8<Avx512>>, (buf: &mut [u64], pat: u64));
+
+/// Footgun, kept visible on purpose: the same NT fill called from a plain generic fn (no
+/// `#[simd]`, no `kernel!`). It compiles and is correct, but at 512 bits every fearless op and
+/// every NT store is an out-of-line call (asm_check marks it KNOWN).
+#[inline(never)]
+fn ntw_plain<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>>(simd: S, buf: &mut [u64], base: u64) {
+    let (_, mid, _) = plumb_lines::as_vectors_mut::<S, V>(simd, buf);
+    plumb_lines::nontemporal(simd, mid, |w| {
+        let base_v = V::splat(simd, base);
+        let step = V::splat(simd, V::LEN as u64);
+        let mut idx = V::from_fn(simd, |i| i as u64);
+        w.fill_with(|_| {
+            let v = idx ^ base_v;
+            idx += step;
+            v
+        });
+    });
+}
 
 // ---------------------------------------------------------------------------------------------
 // Named entry points
@@ -161,6 +202,12 @@ entry!(k_posv_pv_512, Avx512, u64x8, pos_verify_view_at, (buf: &[u64]) -> u64, (
 entry!(k_ntw_pl_128, Avx2, u64x2, ntw_scope_at, (buf: &mut [u64]), (buf, POS_BASE, 0));
 entry!(k_ntw_pl_256, Avx2, u64x4, ntw_scope_at, (buf: &mut [u64]), (buf, POS_BASE, 0));
 entry!(k_ntw_pl_512, Avx512, u64x8, ntw_scope_at, (buf: &mut [u64]), (buf, POS_BASE, 0));
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub fn k_ntw_plplain_512(t: Avx512, buf: &mut [u64]) {
+    ntw_plain::<Avx512, u64x8<Avx512>>(t, buf, POS_BASE)
+}
 
 #[unsafe(no_mangle)]
 #[inline(never)]
