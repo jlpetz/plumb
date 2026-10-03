@@ -34,6 +34,9 @@ mod tmrport;
 mod tests;
 #[cfg(test)]
 mod tests_plumb;
+#[cfg(test)]
+mod tests_tiles;
+mod tiles;
 
 use common::*;
 use fearless_simd::{Avx2, Avx512, Level};
@@ -176,6 +179,8 @@ struct Toks {
     /// plumb_lines' CLFLUSHOPT and MOVDIR64B tokens.
     pcf: plumb_lines::Clflushopt,
     md: Option<plumb_lines::Movdir64b>,
+    /// plumb_tiles' AMX token (TILE + OS-enabled tile state).
+    amx: Option<plumb_tiles::Amx>,
 }
 
 macro_rules! v {
@@ -431,6 +436,51 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         gs.push(port_group("sb", "TMR StuckBit port, flush before verify (3 phases)", t, 6.0));
         gs.push(port_group("refresh", "TMR Refresh port, flush before verify (sleep omitted)", t, 2.0));
         gs.push(port_group("simplent", "TMR SimpleNT port: 4 x (NT positional write, 5 verifies) per chunk", t, 24.0));
+
+        // AMX (plumb_tiles, tiles.rs): tile loads and stores as a DRAM access path, against
+        // AVX-512 kernels moving the same bytes.
+        if let Some(amx) = t.amx {
+            let mut vs = vec![v!("amx", move |b| tiles::k_amx_read(amx, b))];
+            push_if(&mut vs, tmr512, v!("zmm_tmr_512", r(tmr::k_verify4_tmr_512)));
+            if let Some(t5) = t512 {
+                vs.push(v!("amx_verify_512", move |b| tiles::k_amx_verify_512(t5, amx, b)));
+            }
+            gs.push(Group { id: "amxread",
+                title: "AMX read: 4 tile loads in flight vs zmm 4-acc verify; amx_verify = tile load + zmm check",
+                setup: Some(Box::new(w(tmr::k_fill_tmr_256))), prime: Prime::Flush,
+                expect_zero: true, bytes_mult: 1.0, variants: vs });
+
+            let mut vs = vec![v!("amx", move |b| { tiles::k_amx_fill(amx, b); 0 })];
+            push_if(&mut vs, tmr512, v!("zmm_tmr_512", w(tmr::k_fill_tmr_512)));
+            gs.push(Group { id: "amxfill", title: "AMX pattern fill (1 KiB tile stores) vs zmm fill",
+                setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+
+            let mut vs = vec![v!("amx", move |b| { let (d, s) = split(b); tiles::k_amx_copy(amx, d, s); 0 })];
+            if tmr512 {
+                vs.push(v!("nt_tmr_512", |b| {
+                    let (d, s) = split(b);
+                    // SAFETY: equal halves of an aligned buffer; AVX-512F checked.
+                    unsafe { tmr::k_copynt_tmr_512(d.as_mut_ptr(), s.as_ptr(), s.len()) };
+                    0
+                }));
+            }
+            if t.cpu.movdir64b {
+                vs.push(v!("md_tmr", |b| {
+                    let (d, s) = split(b);
+                    // SAFETY: equal halves of an aligned buffer; MOVDIR64B checked.
+                    unsafe { tmr::k_copymd_tmr(d.as_mut_ptr(), s.as_ptr(), s.len()) };
+                    0
+                }));
+            }
+            gs.push(Group { id: "amxcopy", title: "copy half -> half: AMX tiles vs NT-512 vs MOVDIR64B (GiB/s copied)",
+                setup: None, prime: Prime::Flush, expect_zero: false, bytes_mult: 0.5, variants: vs });
+
+            let mut vs = vec![v!("amx", move |b| tiles::k_amx_strided_read(amx, b))];
+            push_if(&mut vs, tmr512, v!("zmm_512", r(tiles::k_amx_strided_read_zmm_512)));
+            gs.push(Group { id: "amxstride",
+                title: "strided read, stride 4096 (one line in each of 16 pages): 1 tile load vs 16 zmm loads",
+                setup: None, prime: Prime::Flush, expect_zero: false, bytes_mult: 1.0, variants: vs });
+        }
     }
     gs.push(port_group("sbnf", "TMR StuckBit port, no flush (3 phases)", t, 6.0));
     gs
@@ -674,6 +724,7 @@ fn main() {
         cf: cap::Clflushopt::try_new().expect("CLFLUSHOPT checked above"),
         pcf: plumb_lines::Clflushopt::try_new().expect("CLFLUSHOPT checked above"),
         md: plumb_lines::Movdir64b::try_new(),
+        amx: plumb_tiles::Amx::try_new(),
     };
     let order = mem::cpu_order();
 

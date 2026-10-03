@@ -49,6 +49,8 @@ TARGET = os.path.join(ROOT, "target", "asm")
 #   loop_calls_ok: True = calls inside loops are expected (the footgun variants)
 #   known:   expected to fail today, with the reason; not counted as a failure
 #   loop_forbid: mnemonics that must not appear in any innermost loop
+#   stack_ok: reason; vector stack operands in loops are intended (e.g. an L1 scratch buffer),
+#            not spills
 #   twin:    a re.sub template on the matched name giving the TMR-style twin kernel; for every
 #            key memory op kind in the twin's innermost loops (load, store, nt, flush, movdir64b)
 #            this kernel's best innermost loop may use at most `twin_tol` (default 0.25) more
@@ -475,7 +477,7 @@ def check(name, rep, reps=None):
                 fails.append(f"loop width {wid}, want {exp['width']}")
         if rep["loop_calls"] and not exp.get("loop_calls_ok"):
             fails.append("call in loop")
-        if rep["spills"] and not exp.get("loop_calls_ok"):
+        if rep["spills"] and not exp.get("loop_calls_ok") and not exp.get("stack_ok"):
             fails.append(f"{rep['spills']} vector stack ops in loop")
     for n in exp.get("need", []):
         if n not in rep["special"]:

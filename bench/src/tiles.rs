@@ -44,6 +44,7 @@ pub fn k_amx_read(amx: Amx, buf: &[u64]) -> u64 {
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn k_amx_copy(amx: Amx, dst: &mut [u64], src: &[u64]) {
+    assert!(dst.len() == src.len() && src.len().is_multiple_of(TILE_U64), "halves must be equal whole tiles");
     amx.with_tiles(|t| {
         let (s, _) = src.as_chunks::<TILE_U64>();
         let (d, _) = dst.as_chunks_mut::<TILE_U64>();
@@ -83,6 +84,7 @@ pub fn k_amx_fill(amx: Amx, buf: &mut [u64]) {
 #[inline(never)]
 pub fn k_amx_strided_read(amx: Amx, buf: &[u64]) -> u64 {
     const GROUP_U64: usize = ROWS * PAGE / 8;
+    assert!(buf.len().is_multiple_of(GROUP_U64), "buffer must be whole 64 KiB groups");
     amx.with_tiles(|t| {
         let (groups, _) = buf.as_chunks::<GROUP_U64>();
         for g in groups {
@@ -131,6 +133,7 @@ pub fn amx_verify<S: Simd>(simd: S, amx: Amx, buf: &[u64], pat: u64) -> u64 {
     let p = u64x8::splat(simd, pat);
     let z = u64x8::splat(simd, 0);
     let (mut a0, mut a1, mut a2, mut a3) = (z, z, z, z);
+    assert!(buf.len().is_multiple_of(TILE_U64), "buffer must be whole tiles");
     amx.with_tiles(|t| {
         let (tiles, _) = buf.as_chunks::<TILE_U64>();
         for b in tiles {

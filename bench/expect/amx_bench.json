@@ -6,6 +6,6 @@
     ["^k_amx_copy$", {"loop_need": ["tileloadd", "tilestored"], "need": ["ldtilecfg", "tilerelease"]}],
     ["^k_amx_fill$", {"loop_need": ["tilestored"], "need": ["ldtilecfg", "tilerelease"]}],
     ["^k_amx_strided_read$", {"loop_need": ["tileloadd"], "need": ["ldtilecfg", "tilerelease"]}],
-    ["^k_amx_verify_512$", {"loop_need": ["tileloadd", "tilestored"], "need": ["ldtilecfg", "tilerelease"]}]
+    ["^k_amx_verify_512$", {"loop_need": ["tileloadd", "tilestored"], "need": ["ldtilecfg", "tilerelease"], "stack_ok": "the 16 [rsp] operands are the L1 scratch rows the tile is stored to and read back with zmm (no AMX-AVX512 here), not spills"}]
   ]
 }
