@@ -50,11 +50,12 @@ Status tracking lives in [TODO.md](TODO.md). The TODO 84 evidence is in
 | Phase | Work | Gate | Status |
 |---|---|---|---|
 | P0 | Workspace, bench moved in from the probe | builds; asm gate reproduces 78/78 | done |
-| P1 | `plumb_lines`: `as_vectors`, `NtStore`, `nontemporal` scope | same 19-instruction NT loop as TMR's; tests | done |
+| P1 | `plumb_lines`: `as_vectors`, `NtStore`, `nontemporal` scope | NT loop no worse than TMR's (now 16 vs 19 instructions); tests | done |
 | P2 | `plumb_lines`: `Clflushopt` + `flush_after`, `Movdir64b` + `direct`, `with_clflushopt!` | intrinsic/asm inlined in loops; tests | done |
 | P2b | TMR StuckBit/Refresh/SimpleNT ported in both styles | same errors under fault injection, memory checked against TMR's sequence; every plumb kernel within 25% of its TMR twin per memory op (asm gate) | done |
 | P2c | Adversarial review of plumb_lines + bench (29 raised, 26 confirmed) | all confirmed findings fixed or documented | done (2026-10-03) |
 | P3 | Upstream: clflushopt stabilization report; MOVDIR64B in rustc/std_detect/stdarch | upstream review | not started |
-| P4 | `plumb_tiles` AMX | tests on real AMX; asm gate; review (21 raised, 16 confirmed, all fixed) | done; bench timing pending |
+| P4 | `plumb_tiles` AMX | tests on real AMX; asm gate; review (21 raised, 16 confirmed, all fixed); timing (no bandwidth gain over zmm; `bench/RESULTS.md`) | done |
+| P4b | Style pass to fearless_simd's (Linebender) conventions; timing sweep | lint set v8 clean, fmt, headers, CI; `bench/RESULTS.md` | done (2026-10-03) |
 | P5 | ACE backend | hardware + assembler/rustc support | waiting |
 | P6 | TMR integration module and pilot (StuckBit first) | parity at every width/thread count; TMR results unchanged | after review |

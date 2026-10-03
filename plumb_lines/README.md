@@ -52,6 +52,12 @@ calls, no `memset`, and instructions per memory op within 25% of the hand-writte
 twin (equal or denser for every range and view kernel). Throughput is
 at parity with hand-written kernels (see the workspace README).
 
+One loop shape to know about: for an OR-accumulate verify over `as_vectors` at 512 bits, walk
+one group of four vectors per iteration (`while let [a, b, c, d, rest @ ..] = mid`). LLVM unrolls
+an `as_chunks::<4>` loop there and reassociates the ORs, which turns each fused
+`vpternlogq acc, p, [mem]` into two instructions; from L2 that was 16% slower. At 128 and 256 bits
+the unrolled loop is fine (faster, if anything).
+
 ## Toolchains
 
 Stable Rust uses `asm!` for CLFLUSHOPT and MOVDIR64B (`asm!` needs no target feature and inlines

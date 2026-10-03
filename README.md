@@ -20,13 +20,16 @@ Status: experimental, `0.1`, not published. Plan and decisions: [PLAN.md](PLAN.m
   TMR's per-width `macro_rules!` kernels at 128/256/512 bits: the same width, 4 independent
   accumulators, no `memset` collapse, no calls in loops. `bench/asm_check.py` checks every
   kernel against its TMR-style twin in instructions per memory op (within 25%). Most are equal or
-  denser, e.g. fill 1.09 vs 1.50, range flush 1.19 vs 1.50, verify 2.19 vs 2.38. The NT write loop
-  has the same 19 instructions as TMR's (registers and order differ). The one looser kernel is
-  a per-line `asm!` flush in a user loop, which costs a `lea` per line (documented).
-- **Throughput parity** (TODO 84 runs, 1 GiB pages, 1-8 threads): within about ±2% everywhere
-  once verify loops are pointer walks. A `chunks_exact` loop over the `u64` slice gets indexed
-  addressing and lost 16% on a 512-bit L2-resident verify; `as_vectors` gives the pointer walk in
-  safe code.
+  denser, e.g. fill 1.09 vs 1.50, range flush 1.09 vs 1.50, positional NT write 4.00 vs 4.75 (four
+  NT stores per `asm!` block). The one looser kernel is a per-line `asm!` flush in a user loop,
+  which costs a `lea` per line (documented). Table: [bench/CODEGEN.md](bench/CODEGEN.md).
+- **Throughput parity** ([bench/RESULTS.md](bench/RESULTS.md); 1 GiB pages, 1/2/4/6/8 threads):
+  every plumb kernel is at 98-105% of its TMR twin in DRAM, and at parity or faster from L2. One
+  loop-shape rule came out of it: at 512 bits, walk an OR-accumulate verify one group of four
+  vectors per iteration. LLVM unrolls an `as_chunks` loop there and loses the fused
+  `vpternlogq`, which cost 16% from L2 (the TODO 84 runs blamed indexed addressing; it wasn't).
+- **`asm!` costs are front-end only.** The `lea`s an `asm!` store or flush costs, and the lost
+  automatic unrolling, made no measurable difference to DRAM bandwidth.
 - **Ported TMR tests.** StuckBit, Refresh and SimpleNT, each written in TMR's style and in plumb
   style, report identical errors under injected faults and leave identical memory. Before every
   injection the test checks memory holds what TMR's sequence should have written (phase pattern,

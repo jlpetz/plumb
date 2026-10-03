@@ -5,23 +5,27 @@ succeeds, the result merges into TMR; if not, nothing here clouds TMR's list. On
 status, decisions, next step. Background is in [PLAN.md](PLAN.md).
 
 ### 1. Owner review of the workspace
-**Status**: Ready for review (2026-10-03). Both crates built, adversarially reviewed and fixed;
-tests and clippy clean on stable, nightly and MSRV; asm gate 124/124 (bench), 8/8 (plumb_lines
-example, stable and nightly), 10/10 (plumb_tiles example).
-**Next**: the owner reviews `plumb_lines`, `plumb_tiles`, `bench/` and the results; then create
-the public repo `jlpetz/plumb` and push.
+**Status**: Ready for review (2026-10-03). Both crates built, adversarially reviewed and fixed,
+and restyled to fearless_simd's (Linebender) conventions; tests and clippy clean on stable,
+nightly and MSRV 1.89; asm gate 130/130 (bench), 8/8 (plumb_lines example, stable and nightly),
+10/10 (plumb_tiles example). Timing done (item 2).
+**Next**: the owner reviews `plumb_lines`, `plumb_tiles`, `bench/` and `bench/RESULTS.md`; then
+create the public repo `jlpetz/plumb` and push (owner approved pushing after review + timing).
 
 ### 2. Timing runs on an idle box
-**Status**: Partly done. TODO 84's full sweep ran clean on 2026-10-03; the plumb kernels, ported
-tests and AMX groups (amxread/amxfill/amxcopy/amxstride) need their own run. Waiting for the
-owner's go-ahead on an idle box.
-**Next**: `cargo +nightly run --release -p plumb-bench` (about 15-20 min; 1 GiB pages, 1-8
-threads; `--only` to narrow), then record the results in `bench/RESULTS.md`.
+**Status**: Done 2026-10-03 (full sweep 825c9a9, verify groups re-run at 4254f13):
+`bench/RESULTS.md`. DRAM parity everywhere (98-105%); the 512-bit view verify's L2 gap found and
+fixed (loop shape, not addressing); `asm!` costs and the lost unroll measured as front-end only.
+**Next**: none; re-run after changes that touch a hot loop.
 
 ### 3. Share the NT design with Shnatsel
 **Status**: Not started. They asked to see NT stores tried in an extension crate first.
-**Next**: once the repo is public, post the `plumb_lines::nt` design (scoped writer, write-only
-slots, SFENCE on exit, `&mut V` alignment) and the asm/parity results in the #simd topic.
+**Next**: once the repo is public, post in the #simd topic: the `plumb_lines::nt` design (scoped
+writer, write-once slots, SFENCE on exit, four stores per `asm!` block) with the asm/parity
+results. Also say: (a) a correction to my earlier post, the 16% 512-bit L2 verify gap was LLVM
+unrolling and reassociating the OR loop (losing the fused `vpternlogq`), not indexed addressing;
+fearless's own `chunks_exact` verify shows it (`fs_512` 83%); (b) `plumb_tiles`' Linux path
+(`arch_prctl`) is compile-checked only, never run.
 
 ### 4. clflushopt stabilization report (upstream)
 **Status**: Not started. `clflushopt` target feature (rust-lang/rust#157098) and `_mm_clflushopt`
@@ -29,10 +33,15 @@ slots, SFENCE on exit, `&mut V` alignment) and the asm/parity results in the #si
 **Next**: draft the stabilization report for #157096 (usage: TMR, plumb_lines); the owner posts.
 
 ### 5. MOVDIR64B in rustc, std_detect and stdarch (upstream)
-**Status**: Not started. rustc rejects `#[target_feature(enable = "movdir64b")]` (LLVM-only),
-std_detect doesn't know it, stdarch has no intrinsic.
-**Next**: three patches modelled on the clflushopt ones (`../clflushopt-rustc.patch`,
-`../clflushopt-stdarch.patch`). plumb_lines keeps `asm!` until it stabilizes.
+**Status**: Probed 2026-10-03, not started. rustc rejects `#[target_feature(enable =
+"movdir64b")]`, std_detect doesn't know it, stdarch has no intrinsic; LLVM has
+`llvm.x86.movdir64b`. `bench/probes/movdir64b.rs`: the intrinsic unrolls and folds the source
+address but the destination is a register by encoding (13 vs 20 instructions per 4 lines); the
+copy is DRAM-bound, so the gain is ergonomics (detection, `target_feature`, a documented
+intrinsic), not speed. NT stores are a different case: `asm!` there is rustc policy
+(rust-lang/rust#114582, #128149), so no compiler PR applies.
+**Next**: owner decides if it's worth sending. If yes: three patches on new branches of
+`../rust-patch` and `../stdarch-patch`, the same shape as the clflushopt commits.
 
 ### 6. plumb_tiles: AMX
 **Status**: Built, reviewed (16 confirmed findings, all fixed) and wired into the bench
@@ -58,9 +67,13 @@ none is faster than existing paths or adds coverage TMR needs today.
 **Next**: none until a test needs one.
 
 ### 10. NT fill without a `lea` per store
-**Status**: Idea (2026-10-03). stdarch's `_mm*_stream_si*` are `asm!`, so each NT store takes its
-address in a register: a 4x constant NT fill is 11 instructions per 4 stores where displacements
-would give 7. TMR's loops pay the same; NT fills are DRAM-bound, so this is front-end only.
-**Next**: try one `asm!` block of 4 `vmovntdq` with displacements in `NtWriter::fill_with` (a
-target-feature fn per register class); keep it only if asm_check shows the shorter loop and it
-still inlines in fearless kernels.
+**Status**: Done 2026-10-03 (825c9a9): `NtStore::stream4`, one `asm!` block of four stores with
+displacements. Positional NT loop 19 -> 16 instructions (TMR 19), constant fill 11 -> 8. No
+bandwidth change (DRAM-bound), as expected.
+**Next**: none.
+
+### 11. Refresh at 256 bits: plumb 110-117% of the TMR-style port
+**Status**: Open (2026-10-03, three runs). The TMR-style port's 256-bit verify loop has an extra
+induction variable (14 instructions per 4 loads; 10 at 512); not shown to be the cause.
+**Next**: compare TMR-APP's own Refresh verify loop; if TMR has the same shape, it's a TMR fix
+(precomputed bound) and a TMR TODO, not a plumb claim.

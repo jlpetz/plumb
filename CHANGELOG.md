@@ -22,6 +22,8 @@ This release has an [MSRV][] of 1.89.
 - Added `nontemporal`, a closure scope for non-temporal stores of any fearless_simd vector at any
   x86 level. It ends with `SFENCE`, including on unwind. Its writer is by value, write-once and
   `!Send`, so safe code can't store a slot twice, read it, or publish it before the fence.
+  `NtWriter::fill_with` issues each group of four stores from one `asm!` block, so the offsets
+  are displacements rather than a `lea` per store.
 - Added `Clflushopt` (a CPUID-checked token with the flush line size) and `flush_after`, a scope
   that flushes everything it lent out and then runs `MFENCE`.
 - Added `Movdir64b` and `direct`, a closure scope for MOVDIR64B 64-byte direct stores ending with
