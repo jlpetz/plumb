@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["plumb_lines", "plumb_tiles", "bench"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+authors = ["Jarrod Petz"]
+repository = "https://github.com/jlpetz/plumb"
+
+[workspace.dependencies]
+# Pinned exactly: plumb_lines' capability-token entry macro copies fearless_simd's per-level
+# target-feature lists, so an upgrade must be deliberate (re-run bench/asm_check.py and the
+# `level_features_are_detected` test).
+fearless_simd = "=1.0.0"
+fearless_simd_macros = "=0.1.0"
+
+[profile.release]
+opt-level = 3
+# One CGU keeps `--emit asm` to one file and loop placement stable between builds.
+codegen-units = 1
+lto = false
+panic = "abort"

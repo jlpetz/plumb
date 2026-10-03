@@ -1,0 +1,20 @@
+[package]
+name = "plumb-bench"
+version = "0.0.0"
+publish = false
+description = "Benchmarks, asm gate and equivalence tests for plumb_lines/plumb_tiles against TMR's current SIMD style"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fearless_simd.workspace = true
+fearless_simd_macros.workspace = true
+plumb_lines = { path = "../plumb_lines", features = ["nightly"] }
+plumb_tiles = { path = "../plumb_tiles" }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
