@@ -78,7 +78,20 @@ fn view_fill_and_verify_any_alignment() {
     if let Some(t5) = t.t5 {
         fills.push(("pv_512", Box::new(move |b| lines::k_fill_pv_512(t5, b))));
         verifies.push(("pv_512", Box::new(move |b| lines::k_verify4_pv_512(t5, b))));
+        verifies.push((
+            "pvch_512",
+            Box::new(move |b| lines::k_verify4_pvch_512(t5, b)),
+        ));
+        verifies.push(("pv8_512", Box::new(move |b| lines::k_verify8_pv_512(t5, b))));
     }
+    verifies.push((
+        "pvpat_128",
+        Box::new(move |b| lines::k_verify4_pvpat_128(t.t2, b)),
+    ));
+    verifies.push((
+        "pvpat_256",
+        Box::new(move |b| lines::k_verify4_pvpat_256(t.t2, b)),
+    ));
     let mut store = buf(8192 + 32);
     let all = words(&mut store);
     for off in OFFSETS {

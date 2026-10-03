@@ -52,9 +52,28 @@ pub fn fill_view_plain<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &mut
 }
 
 /// 4-accumulator verify through the aligned view. The vectors are a `&[V]`, so the loop is a
-/// pointer walk (the shape that fixed the 512-bit L2 gap; TODO 84 findings).
+/// pointer walk with base+displacement addressing. The loop shape depends on the width, as
+/// measured from L2 (`bench/RESULTS.md`): at 512 bits it walks one quad per iteration, because
+/// LLVM unrolls an `as_chunks` loop and reassociates the ORs, which turns each fused
+/// `vpternlogq acc, p, [mem]` into `vpxorq` + `vpternlogq` (16% slower). At 128 and 256 bits the
+/// unrolled `as_chunks` loop is the faster one (3% and 10% over TMR's).
 #[simd]
 pub fn verify4_view<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &[u64], pat: u64) -> u64 {
+    if size_of::<V>() == 64 {
+        verify4_view_pat::<S, V>(simd, buf, pat)
+    } else {
+        verify4_view_chunks::<S, V>(simd, buf, pat)
+    }
+}
+
+/// `verify4_view`'s `as_chunks::<4>` shape, at every width (`k_verify4_pvch_512` keeps the
+/// 512-bit case measurable).
+#[simd]
+pub fn verify4_view_chunks<S: Simd, V: SimdInt<S, Element = u64>>(
+    simd: S,
+    buf: &[u64],
+    pat: u64,
+) -> u64 {
     let (head, mid, tail) = plumb_lines::as_vectors::<S, V>(simd, buf);
     debug_assert!(head.len() < V::LEN && tail.len() < V::LEN);
     let p = V::splat(simd, pat);
@@ -71,6 +90,65 @@ pub fn verify4_view<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &[u64],
         a0 |= v ^ p;
     }
     let bad = ((a0 | a1) | (a2 | a3)).simd_eq(z).any_false()
+        || head
+            .iter()
+            .take(V::LEN - 1)
+            .chain(tail.iter().take(V::LEN - 1))
+            .any(|&w| w != pat);
+    bad as u64
+}
+
+/// The 4-accumulator verify over the view as a slice-pattern loop, one quad per iteration: the
+/// shape of `verify4_ptr` without raw pointers, which LLVM leaves un-unrolled.
+#[simd]
+pub fn verify4_view_pat<S: Simd, V: SimdInt<S, Element = u64>>(
+    simd: S,
+    buf: &[u64],
+    pat: u64,
+) -> u64 {
+    let (head, mid, tail) = plumb_lines::as_vectors::<S, V>(simd, buf);
+    let p = V::splat(simd, pat);
+    let z = V::splat(simd, 0);
+    let (mut a0, mut a1, mut a2, mut a3) = (z, z, z, z);
+    let mut rest = mid;
+    while let [v0, v1, v2, v3, more @ ..] = rest {
+        a0 |= *v0 ^ p;
+        a1 |= *v1 ^ p;
+        a2 |= *v2 ^ p;
+        a3 |= *v3 ^ p;
+        rest = more;
+    }
+    for &v in rest {
+        a0 |= v ^ p;
+    }
+    let bad = ((a0 | a1) | (a2 | a3)).simd_eq(z).any_false()
+        || head
+            .iter()
+            .take(V::LEN - 1)
+            .chain(tail.iter().take(V::LEN - 1))
+            .any(|&w| w != pat);
+    bad as u64
+}
+
+/// L2 512-bit gap experiment: 8 accumulators over `as_chunks::<8>`. LLVM still unrolls and
+/// reassociates it (83% of TMR's), so more accumulators don't help.
+#[simd]
+pub fn verify8_view<S: Simd, V: SimdInt<S, Element = u64>>(simd: S, buf: &[u64], pat: u64) -> u64 {
+    let (head, mid, tail) = plumb_lines::as_vectors::<S, V>(simd, buf);
+    let p = V::splat(simd, pat);
+    let z = V::splat(simd, 0);
+    let mut a = [z; 8];
+    let (eights, rest) = mid.as_chunks::<8>();
+    for e in eights {
+        for k in 0..8 {
+            a[k] |= e[k] ^ p;
+        }
+    }
+    for &v in rest {
+        a[0] |= v ^ p;
+    }
+    let acc = ((a[0] | a[1]) | (a[2] | a[3])) | ((a[4] | a[5]) | (a[6] | a[7]));
+    let bad = acc.simd_eq(z).any_false()
         || head
             .iter()
             .take(V::LEN - 1)
@@ -249,6 +327,10 @@ entry!(k_fill_pv_512, Avx512, u64x8, fill_view, (buf: &mut [u64]), (buf, PATTERN
 entry!(k_verify4_pv_128, Avx2, u64x2, verify4_view, (buf: &[u64]) -> u64, (buf, PATTERN));
 entry!(k_verify4_pv_256, Avx2, u64x4, verify4_view, (buf: &[u64]) -> u64, (buf, PATTERN));
 entry!(k_verify4_pv_512, Avx512, u64x8, verify4_view, (buf: &[u64]) -> u64, (buf, PATTERN));
+entry!(k_verify4_pvpat_128, Avx2, u64x2, verify4_view_pat, (buf: &[u64]) -> u64, (buf, PATTERN));
+entry!(k_verify4_pvpat_256, Avx2, u64x4, verify4_view_pat, (buf: &[u64]) -> u64, (buf, PATTERN));
+entry!(k_verify4_pvch_512, Avx512, u64x8, verify4_view_chunks, (buf: &[u64]) -> u64, (buf, PATTERN));
+entry!(k_verify8_pv_512, Avx512, u64x8, verify8_view, (buf: &[u64]) -> u64, (buf, PATTERN));
 entry!(k_posv_pv_128, Avx2, u64x2, pos_verify_view_at, (buf: &[u64]) -> u64, (buf, POS_BASE, 0));
 entry!(k_posv_pv_256, Avx2, u64x4, pos_verify_view_at, (buf: &[u64]) -> u64, (buf, POS_BASE, 0));
 entry!(k_posv_pv_512, Avx512, u64x8, pos_verify_view_at, (buf: &[u64]) -> u64, (buf, POS_BASE, 0));

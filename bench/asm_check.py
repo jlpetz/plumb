@@ -520,6 +520,35 @@ def check(name, rep, reps=None):
     return fails
 
 
+def twins_table(kernels, funcs):
+    """Print every kernel with a `twin` rule next to its twin, as a markdown table: instructions
+    per key memory op in the densest innermost loop, per op kind (lower is better)."""
+    reps = {k: analyse(k, funcs) for k in kernels}
+    print("| plumb kernel | TMR-style twin | op | plumb instrs/op | twin instrs/op | plumb vs twin |")
+    print("|---|---|---|---:|---:|---|")
+    for k in kernels:
+        twin = None
+        for pat, e in EXPECT:
+            if "twin" in e and re.search(pat, k):
+                twin = re.sub(pat, e["twin"], k)
+        if not twin or twin not in reps:
+            continue
+        mine, theirs = reps[k]["density"], reps[twin]["density"]
+        for kd in sorted(theirs):
+            d, td = mine.get(kd), theirs[kd]
+            if d is None:
+                verdict = "missing"
+            elif abs(d - td) < 1e-9:
+                verdict = "equal"
+            elif d < td:
+                verdict = f"denser ({(1 - d / td) * 100:.0f}% fewer)"
+            else:
+                verdict = f"looser ({(d / td - 1) * 100:.0f}% more)"
+            ds = f"{d:.2f}" if d is not None else "-"
+            print(f"| `{k}` | `{twin}` | {kd} | {ds} | {td:.2f} | {verdict} |")
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     load_expect_files()
@@ -539,6 +568,8 @@ def main():
             for t in body:
                 print("   ", t)
         return 0
+    if "--twins" in args:
+        return twins_table(kernels, funcs)
     print(f"asm: {os.path.relpath(path, HERE)}  ({len(funcs)} functions, {len(kernels)} kernels)\n")
     hdr = (f"{'kernel':<24} {'width':<5} {'loop sizes':<12} {'spill':>5}  {'special (*=in loop)':<40} "
            f"{'calls in loop / libcalls':<26} verdict")

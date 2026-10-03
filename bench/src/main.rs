@@ -298,10 +298,16 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         vs.push(v!("fsptr_512", move |b| fs::k_verify4_fsptr_512(t5, b)));
     }
     if !dram {
+        vs.push(v!("pvpat_128", move |b| lines::k_verify4_pvpat_128(t2, b)));
+        vs.push(v!("pvpat_256", move |b| lines::k_verify4_pvpat_256(t2, b)));
         vs.push(v!("fssplit_128", move |b| fs::k_verify4_fssplit_128(t2, b)));
         vs.push(v!("fssplit_256", move |b| fs::k_verify4_fssplit_256(t2, b)));
         if let Some(t5) = t512 {
             vs.push(v!("fssplit_512", move |b| fs::k_verify4_fssplit_512(t5, b)));
+            // The view verify at 512 in the other two loop shapes (L2 gap experiment):
+            // `as_chunks` (LLVM-unrolled) and 8 accumulators.
+            vs.push(v!("pvch_512", move |b| lines::k_verify4_pvch_512(t5, b)));
+            vs.push(v!("pv8_512", move |b| lines::k_verify8_pv_512(t5, b)));
         }
         // Footguns: a non-inlined helper in each style (L2 only; slow by design).
         push_if(
