@@ -48,7 +48,8 @@ verify read come from DRAM, not memory safety, and it gives ordinary `&mut` acce
 Every hot-path function is `#[inline(always)]`. Call the scopes from inside a fearless `#[simd]`
 function or `kernel!`, so they inline into the function with the target features. The
 workspace's `bench/asm_check.py` checks the loops: the expected instruction, the named width, no
-calls, no `memset`, and loop sizes no worse than the hand-written per-width twin. Throughput is
+calls, no `memset`, and instructions per memory op within 25% of the hand-written per-width
+twin (equal or denser for every range and view kernel). Throughput is
 at parity with hand-written kernels (see the workspace README).
 
 ## Toolchains

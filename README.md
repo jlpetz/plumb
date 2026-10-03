@@ -18,14 +18,19 @@ Status: experimental, `0.1`, not published. Plan and decisions: [PLAN.md](PLAN.m
 
 - **Codegen parity.** Generic fearless kernels plus plumb_lines produce the same hot loops as
   TMR's per-width `macro_rules!` kernels at 128/256/512 bits: the same width, 4 independent
-  accumulators, no `memset` collapse, no calls in loops. The NT write loop is
-  instruction-for-instruction identical. `bench/asm_check.py` checks every kernel.
+  accumulators, no `memset` collapse, no calls in loops. `bench/asm_check.py` checks every
+  kernel against its TMR-style twin in instructions per memory op (within 25%). Most are equal or
+  denser, e.g. fill 1.09 vs 1.50, range flush 1.19 vs 1.50, verify 2.19 vs 2.38. The NT write loop
+  has the same 19 instructions as TMR's (registers and order differ). The one looser kernel is
+  a per-line `asm!` flush in a user loop, which costs a `lea` per line (documented).
 - **Throughput parity** (TODO 84 runs, 1 GiB pages, 1-8 threads): within about ±2% everywhere
   once verify loops are pointer walks. A `chunks_exact` loop over the `u64` slice gets indexed
   addressing and lost 16% on a 512-bit L2-resident verify; `as_vectors` gives the pointer walk in
   safe code.
 - **Ported TMR tests.** StuckBit, Refresh and SimpleNT, each written in TMR's style and in plumb
-  style, report identical errors under injected faults and leave identical memory.
+  style, report identical errors under injected faults and leave identical memory. Before every
+  injection the test checks memory holds what TMR's sequence should have written (phase pattern,
+  global positional index), so a wrong pattern or a skipped verify fails.
 - **Instructions fearless_simd can't carry yet**, made to work: NT stores (any fearless vector,
   any level), CLFLUSHOPT inlined inside fearless loops (via a capability-token entry macro on
   nightly, or `asm!` on stable), MOVDIR64B, and AMX tiles.
@@ -37,7 +42,8 @@ cargo test -p plumb_lines                          # stable
 cargo +nightly test -p plumb_lines --features nightly
 cargo test -p plumb_tiles                          # needs an AMX CPU for the hardware tests
 cargo +nightly test --release -p plumb-bench       # equivalence tests
-cd bench && python asm_check.py                    # the codegen gate
+cd bench && python asm_check.py                    # the codegen gate (bench, nightly feature)
+python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable
 cargo +nightly run --release -p plumb-bench        # benchmark: idle box, ~15 min, 1 GiB pages
 ```
 
