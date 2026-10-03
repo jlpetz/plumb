@@ -16,7 +16,7 @@ ported tests need their own run.
 pages, 1-8 threads) and record the results in `bench/RESULTS.md`.
 
 ### 3. Share the NT design with Shnatsel
-**Status**: Not started. He asked to see NT stores tried in an extension crate first.
+**Status**: Not started. They asked to see NT stores tried in an extension crate first.
 **Next**: once the repo is public, post the `plumb_lines::nt` design (scoped writer, write-only
 slots, SFENCE on exit, `&mut V` alignment) and the asm/parity results in the #simd topic.
 
@@ -52,3 +52,11 @@ equivalence tests, then Refresh, SimpleTest, SimpleNT, MirrorMove. Updating TMR'
 **Status**: Deferred (owner decision 2026-10-03). CLWB, CLZERO, CLDEMOTE, MOVDIRI, PREFETCHW:
 none is faster than existing paths or adds coverage TMR needs today.
 **Next**: none until a test needs one.
+
+### 10. NT fill without a `lea` per store
+**Status**: Idea (2026-10-03). stdarch's `_mm*_stream_si*` are `asm!`, so each NT store takes its
+address in a register: a 4x constant NT fill is 11 instructions per 4 stores where displacements
+would give 7. TMR's loops pay the same; NT fills are DRAM-bound, so this is front-end only.
+**Next**: try one `asm!` block of 4 `vmovntdq` with displacements in `NtWriter::fill_with` (a
+target-feature fn per register class); keep it only if asm_check shows the shorter loop and it
+still inlines in fearless kernels.
