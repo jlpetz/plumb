@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Cache-line and memory-ordering operations for fearless_simd: aligned vector views, scoped non-temporal stores, CLFLUSHOPT and MOVDIR64B"
 readme = "README.md"
 keywords = ["simd", "non-temporal", "clflushopt", "movdir64b", "fearless_simd"]
-categories = ["hardware-support", "no-std"]
+categories = ["hardware-support"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,10 +12,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-fearless_simd = { workspace = true, default-features = false, features = ["libm"] }
+fearless_simd.workspace = true
 
 [dev-dependencies]
-fearless_simd = { workspace = true }
 fearless_simd_macros.workspace = true
 
 [features]
