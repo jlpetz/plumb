@@ -26,10 +26,14 @@
 mod cap;
 mod common;
 mod fs;
+mod lines;
 mod mem;
 mod tmr;
+mod tmrport;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_plumb;
 
 use common::*;
 use fearless_simd::{Avx2, Avx512, Level};
@@ -94,7 +98,8 @@ fn usage() -> ! {
         "usage: fearless-test [--quick] [--regime l2|dram|both] [--only ids] [--threads 1,2,4,6,8]\n\
          \x20      [--per-thread-mib 2048] [--pages huge|large|small] [--samples 5] [--cpu 2]\n\
          \x20      [--csv results.csv]\n\
-         group ids: fill verify4 posw posv lcgw flush ntw wflush pfv copy"
+         group ids: fill verify4 posw posv lcgw flush sbnf; DRAM only: ntw wflush pfv copy\n\
+         \x20 fillflush sb refresh simplent"
     );
     std::process::exit(2)
 }
@@ -168,6 +173,9 @@ struct Toks {
     cpu: Cpu,
     /// CLFLUSHOPT capability token (prototype, `cap.rs`); gated at startup like TMR's.
     cf: cap::Clflushopt,
+    /// plumb_lines' CLFLUSHOPT and MOVDIR64B tokens.
+    pcf: plumb_lines::Clflushopt,
+    md: Option<plumb_lines::Movdir64b>,
 }
 
 macro_rules! v {
@@ -195,7 +203,7 @@ fn split(b: &mut [u64]) -> (&mut [u64], &[u64]) {
 }
 
 fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
-    let (t2, t512, tmr512, lvl, cf) = (t.t2, t.t512, t.tmr512, t.level, t.cf);
+    let (t2, t512, tmr512, lvl, cf, pcf, md) = (t.t2, t.t512, t.tmr512, t.level, t.cf, t.pcf, t.md);
     let dram = regime == Regime::Dram;
     let mut gs = Vec::new();
     let push_if = |vs: &mut Vec<Variant<'a>>, ok: bool, v: Variant<'a>| {
@@ -215,6 +223,11 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         vs.push(v!("fs_512", move |b| { fs::k_fill_fs_512(t5, b); 0 }));
     }
     vs.push(v!("fs_auto", move |b| { fs::k_fill_fs_auto(lvl, b); 0 }));
+    vs.push(v!("pv_128", move |b| { lines::k_fill_pv_128(t2, b); 0 }));
+    vs.push(v!("pv_256", move |b| { lines::k_fill_pv_256(t2, b); 0 }));
+    if let Some(t5) = t512 {
+        vs.push(v!("pv_512", move |b| { lines::k_fill_pv_512(t5, b); 0 }));
+    }
     gs.push(Group { id: "fill", title: "constant fill (StuckBit/Refresh write)", setup: None,
         prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
 
@@ -229,6 +242,12 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         vs.push(v!("fs_512", move |b| fs::k_verify4_fs_512(t5, b)));
     }
     vs.push(v!("fs_auto", move |b| fs::k_verify4_fs_auto(lvl, b)));
+    // plumb_lines aligned views: the pointer-walk shape with no raw pointers in user code.
+    vs.push(v!("pv_128", move |b| lines::k_verify4_pv_128(t2, b)));
+    vs.push(v!("pv_256", move |b| lines::k_verify4_pv_256(t2, b)));
+    if let Some(t5) = t512 {
+        vs.push(v!("pv_512", move |b| lines::k_verify4_pv_512(t5, b)));
+    }
     // Loop-shape experiment (fs.rs): the same body with a raw-pointer walk (TMR's shape), and
     // in L2 also a split_at walk.
     vs.push(v!("fsptr_128", move |b| fs::k_verify4_fsptr_128(t2, b)));
@@ -276,6 +295,11 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
     if let Some(t5) = t512 {
         vs.push(v!("fs_512", move |b| fs::k_posv_fs_512(t5, b)));
     }
+    vs.push(v!("pv_128", move |b| lines::k_posv_pv_128(t2, b)));
+    vs.push(v!("pv_256", move |b| lines::k_posv_pv_256(t2, b)));
+    if let Some(t5) = t512 {
+        vs.push(v!("pv_512", move |b| lines::k_posv_pv_512(t5, b)));
+    }
     gs.push(Group { id: "posv", title: "positional verify, 1 accumulator (SimpleTest verify)",
         setup: Some(Box::new(w(tmr::k_posw_tmr_256))),
         prime: if dram { Prime::Flush } else { Prime::None },
@@ -304,6 +328,7 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         v!("fsintr", move |b| { fs::k_flush_fsintr(t2, b); 0 }),
         v!("fsasm", move |b| { fs::k_flush_fsasm(t2, b); 0 }),
         v!("fscap", move |b| { cap::k_flush_fscap(t2, cf, b); 0 }),
+        v!("pl", move |b| { lines::k_flush_pl(pcf, b); 0 }),
     ];
     gs.push(Group { id: "flush", title: "CLFLUSHOPT range + MFENCE (flush_range_to_dram)",
         setup: None, prime: Prime::Dirty, expect_zero: false, bytes_mult: 1.0, variants: vs });
@@ -319,7 +344,10 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         if let Some(t5) = t512 {
             vs.push(v!("fs_512", move |b| { fs::k_ntw_fs_512(t5, b); 0 }));
             vs.push(v!("fsk_512", move |b| { fs::k_ntw_fsk_512(t5, b); 0 }));
+            vs.push(v!("pl_512", move |b| { lines::k_ntw_pl_512(t5, b); 0 }));
         }
+        vs.insert(2, v!("pl_128", move |b| { lines::k_ntw_pl_128(t2, b); 0 }));
+        vs.insert(5, v!("pl_256", move |b| { lines::k_ntw_pl_256(t2, b); 0 }));
         gs.push(Group { id: "ntw", title: "NT positional write, 4x unroll + SFENCE (SimpleNT)",
             setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
 
@@ -334,7 +362,11 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             vs.push(v!("fsintr_512", move |b| { fs::k_wflush_fsintr_512(t5, b); 0 }));
             vs.push(v!("fsasm_512", move |b| { fs::k_wflush_fsasm_512(t5, b); 0 }));
             vs.push(v!("fscap_512", move |b| { cap::k_wflush_fscap_512(t5, cf, b, PATTERN); 0 }));
+            vs.push(v!("pltok_512", move |b| { lines::k_wflush_pltok_512(t5, pcf, b); 0 }));
+            vs.push(v!("plentry_512", move |b| { lines::k_wflush_plentry_512(t5, pcf, b); 0 }));
         }
+        vs.insert(4, v!("pltok_256", move |b| { lines::k_wflush_pltok_256(t2, pcf, b); 0 }));
+        vs.insert(5, v!("plentry_256", move |b| { lines::k_wflush_plentry_256(t2, pcf, b); 0 }));
         gs.push(Group { id: "wflush", title: "write line + CLFLUSHOPT it, same loop (mixed)",
             setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
 
@@ -373,10 +405,86 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             }));
             vs.push(v!("md_fs", move |b| { let (d, s) = split(b); fs::k_copymd_fs(t2, d, s); 0 }));
         }
+        if let Some(m) = md {
+            vs.push(v!("md_pl", move |b| { let (d, s) = split(b); lines::k_copymd_pl(m, d, s); 0 }));
+        }
         gs.push(Group { id: "copy", title: "copy half -> half: NT-512 vs MOVDIR64B (GiB/s copied)",
             setup: None, prime: Prime::Flush, expect_zero: false, bytes_mult: 0.5, variants: vs });
+
+        // Write a chunk then flush everything written (TMR: fill + flush_range_to_dram).
+        let mut vs = vec![
+            v!("tmr_256", |b| { lines::k_fillflush_tmr_256(b); 0 }),
+            v!("pl_256", move |b| { lines::k_fillflush_pl_256(t2, pcf, b); 0 }),
+        ];
+        push_if(&mut vs, tmr512, v!("tmr_512", |b| { lines::k_fillflush_tmr_512(b); 0 }));
+        if let Some(t5) = t512 {
+            vs.push(v!("pl_512", move |b| { lines::k_fillflush_pl_512(t5, pcf, b); 0 }));
+        }
+        if let Some(m) = md {
+            vs.push(v!("md_pl", move |b| { lines::k_fillmd_pl(m, b); 0 }));
+        }
+        gs.push(Group { id: "fillflush", title: "fill then flush the range (flush_after scope); md_pl = MOVDIR64B fill",
+            setup: None, prime: Prime::None, expect_zero: false, bytes_mult: 1.0, variants: vs });
+
+        // Ported TMR tests (tmrport.rs). Throughput counts TMR's traffic: StuckBit 3 writes +
+        // 3 reads, Refresh and SimpleNT 1 + 1.
+        gs.push(port_group("sb", "TMR StuckBit port, flush before verify (3 phases)", t, 6.0));
+        gs.push(port_group("refresh", "TMR Refresh port, flush before verify (sleep omitted)", t, 2.0));
+        gs.push(port_group("simplent", "TMR SimpleNT port: NT positional write + verify", t, 2.0));
     }
+    gs.push(port_group("sbnf", "TMR StuckBit port, no flush (3 phases)", t, 6.0));
     gs
+}
+
+/// The ported-TMR-test groups (TMR style vs plumb style at 256/512). They return error counts,
+/// which must be 0 on clean memory.
+fn port_group<'a>(id: &'static str, title: &'static str, t: &'a Toks, bytes_mult: f64) -> Group<'a> {
+    let (t2, t512, tmr512, pcf) = (t.t2, t.t512, t.tmr512, t.pcf);
+    let mut vs: Vec<Variant<'a>> = Vec::new();
+    match id {
+        "sb" => {
+            vs.push(v!("tmr_256", tmrport::k_sb_tmr_256));
+            vs.push(v!("pl_256", move |b| tmrport::k_sb_pl_256(t2, pcf, b)));
+            if tmr512 {
+                vs.push(v!("tmr_512", tmrport::k_sb_tmr_512));
+            }
+            if let Some(t5) = t512 {
+                vs.push(v!("pl_512", move |b| tmrport::k_sb_pl_512(t5, pcf, b)));
+            }
+        }
+        "sbnf" => {
+            vs.push(v!("tmr_256", tmrport::k_sbnf_tmr_256));
+            vs.push(v!("pl_256", move |b| tmrport::k_sbnf_pl_256(t2, pcf, b)));
+            if tmr512 {
+                vs.push(v!("tmr_512", tmrport::k_sbnf_tmr_512));
+            }
+            if let Some(t5) = t512 {
+                vs.push(v!("pl_512", move |b| tmrport::k_sbnf_pl_512(t5, pcf, b)));
+            }
+        }
+        "refresh" => {
+            vs.push(v!("tmr_256", tmrport::k_refresh_tmr_256));
+            vs.push(v!("pl_256", move |b| tmrport::k_refresh_pl_256(t2, pcf, b)));
+            if tmr512 {
+                vs.push(v!("tmr_512", tmrport::k_refresh_tmr_512));
+            }
+            if let Some(t5) = t512 {
+                vs.push(v!("pl_512", move |b| tmrport::k_refresh_pl_512(t5, pcf, b)));
+            }
+        }
+        "simplent" => {
+            vs.push(v!("tmr_256", tmrport::k_simplent_tmr_256));
+            vs.push(v!("pl_256", move |b| tmrport::k_simplent_pl_256(t2, b)));
+            if tmr512 {
+                vs.push(v!("tmr_512", tmrport::k_simplent_tmr_512));
+            }
+            if let Some(t5) = t512 {
+                vs.push(v!("pl_512", move |b| tmrport::k_simplent_pl_512(t5, b)));
+            }
+        }
+        _ => unreachable!("unknown port group {id}"),
+    }
+    Group { id, title, setup: None, prime: Prime::None, expect_zero: true, bytes_mult, variants: vs }
 }
 
 #[derive(Clone, Copy)]
@@ -564,6 +672,8 @@ fn main() {
         level,
         cpu,
         cf: cap::Clflushopt::try_new().expect("CLFLUSHOPT checked above"),
+        pcf: plumb_lines::Clflushopt::try_new().expect("CLFLUSHOPT checked above"),
+        md: plumb_lines::Movdir64b::try_new(),
     };
     let order = mem::cpu_order();
 

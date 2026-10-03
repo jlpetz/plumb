@@ -46,7 +46,8 @@ TARGET = os.path.join(ROOT, "target", "asm")
 #   canary:  byte-uniform fill; report whether it collapsed to memset, don't fail either way
 #   loop_calls_ok: True = calls inside loops are expected (the footgun variants)
 #   known:   expected to fail today, with the reason; not counted as a failure
-# Default for every kernel: no memset/memcpy, no calls in loops, no vector spills in loops.
+# Default for every kernel: no memset/memcpy, and no calls or vector spills in innermost loops
+# (a call in an outer loop, like TMR's flush once per chunk, is fine).
 # --------------------------------------------------------------------------------------------
 EXPECT = [
     # Byte-uniform canary: reported, never failed. A memset here is the known trap; a surviving
@@ -265,6 +266,23 @@ def analyse(name, funcs):
             body = [t for _, t in ins[a:b + 1] if t and not t.startswith("#")]
             rep["loop_text"].append((f, body))
             rep["loop_sizes"].append(len(body))
+        # Innermost loops contain no other loop. A call there costs per element (the failure
+        # this gate exists for); a call in an outer loop, e.g. TMR's flush once per chunk, doesn't.
+        inner = set()
+        for a, b in lps:
+            if not any(a <= c and d <= b and (c, d) != (a, b) for c, d in lps):
+                inner.update(range(a, b + 1))
+        # Blocks that end in `ret` are exits, never loop iterations, even when a backward branch
+        # to a shared exit makes them look like part of a loop. Their stack traffic is the
+        # epilogue (Windows x64 restores callee-saved xmm6-15 there), not spills.
+        exits = set()
+        for r, (_, txt) in enumerate(ins):
+            if txt and txt.split()[0] == "ret":
+                j = r
+                while j >= 0 and ins[j][0] is None and not (ins[j][1] or "").startswith("j"):
+                    exits.add(j)
+                    j -= 1
+        inner -= exits
         for i, (_, txt) in enumerate(ins):
             if not txt:
                 continue
@@ -281,13 +299,13 @@ def analyse(name, funcs):
                 plain = demangle(t)
                 if any(lc in plain for lc in LIBCALLS):
                     rep["libcalls"].add(plain)
-                if i in in_loop and op == "call":
+                if i in inner and op == "call":
                     rep["loop_calls"].add(plain)
             if i in in_loop:
                 for reg in re.findall(r"\b([xyz]mm)\d+\b", txt):
                     rep["loop_regs"].add(reg)
-                if re.search(r"\[rsp", txt) and re.search(r"\b[xyz]mm\d+\b", txt):
-                    rep["spills"] += 1
+            if i in inner and re.search(r"\[rsp", txt) and re.search(r"\b[xyz]mm\d+\b", txt):
+                rep["spills"] += 1
     return rep
 
 

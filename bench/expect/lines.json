@@ -1,0 +1,10 @@
+{
+  "_comment": "Expectations for bench/src/lines.rs and tmrport.rs kernels (plumb_lines and the ported TMR tests). Width rules come from the _128/_256/_512 suffix rules in asm_check.py.",
+  "special": [],
+  "expect": [
+    ["^k_fillflush_", {"loop_need": ["clflushopt"], "need": ["mfence"]}],
+    ["^k_fillmd_", {"loop_need": ["movdir64b"], "need": ["sfence"]}],
+    ["^k_(sb|refresh)_", {"loop_need": ["clflushopt"], "need": ["mfence"]}],
+    ["^k_simplent_", {"loop_need": ["movntdq"], "need": ["sfence"]}]
+  ]
+}
