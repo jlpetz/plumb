@@ -5,15 +5,18 @@ succeeds, the result merges into TMR; if not, nothing here clouds TMR's list. On
 status, decisions, next step. Background is in [PLAN.md](PLAN.md).
 
 ### 1. Owner review of the workspace
-**Status**: Ready for review (2026-10-03).
+**Status**: Ready for review (2026-10-03). Both crates built, adversarially reviewed and fixed;
+tests and clippy clean on stable, nightly and MSRV; asm gate 124/124 (bench), 8/8 (plumb_lines
+example, stable and nightly), 10/10 (plumb_tiles example).
 **Next**: the owner reviews `plumb_lines`, `plumb_tiles`, `bench/` and the results; then create
 the public repo `jlpetz/plumb` and push.
 
 ### 2. Timing runs on an idle box
-**Status**: Partly done. TODO 84's full sweep ran clean on 2026-10-03; the new plumb kernels and
-ported tests need their own run.
-**Next**: with the box idle, `cargo +nightly run --release -p plumb-bench` (about 15 min; 1 GiB
-pages, 1-8 threads) and record the results in `bench/RESULTS.md`.
+**Status**: Partly done. TODO 84's full sweep ran clean on 2026-10-03; the plumb kernels, ported
+tests and AMX groups (amxread/amxfill/amxcopy/amxstride) need their own run. Waiting for the
+owner's go-ahead on an idle box.
+**Next**: `cargo +nightly run --release -p plumb-bench` (about 15-20 min; 1 GiB pages, 1-8
+threads; `--only` to narrow), then record the results in `bench/RESULTS.md`.
 
 ### 3. Share the NT design with Shnatsel
 **Status**: Not started. They asked to see NT stores tried in an extension crate first.
@@ -32,10 +35,11 @@ std_detect doesn't know it, stdarch has no intrinsic.
 `../clflushopt-stdarch.patch`). plumb_lines keeps `asm!` until it stabilizes.
 
 ### 6. plumb_tiles: AMX
-**Status**: In progress (built and reviewed by a workflow 2026-10-03; see the crate).
-**Next**: AMX kernels in the bench harness (tile load/store DRAM sweeps vs AVX-512); then the
-TMR TODO 86 probe: does a 16-row x 8-byte AMX tile store beat AVX-512 scatter for TM5's
-strided u64 writes? Raw asm first; only add shapes to the crate if it wins.
+**Status**: Built, reviewed (16 confirmed findings, all fixed) and wired into the bench
+(2026-10-03); timing is item 2.
+**Next**: after the timing run, the TMR TODO 86 probe: does a 16-row x 8-byte AMX tile store beat
+AVX-512 scatter for TM5's strided u64 writes? Raw asm first; only add shapes to the crate if it
+wins.
 
 ### 7. ACE backend
 **Status**: Waiting: no hardware; LLVM PRs open (llvm-project#208408/#208706), nothing in rustc.
