@@ -25,7 +25,9 @@ writer, write-once slots, SFENCE on exit, four stores per `asm!` block) with the
 results. Also say: (a) a correction to my earlier post, the 16% 512-bit L2 verify gap was LLVM
 unrolling and reassociating the OR loop (losing the fused `vpternlogq`), not indexed addressing;
 fearless's own `chunks_exact` verify shows it (`fs_512` 83%); (b) `plumb_tiles`' Linux path
-(`arch_prctl`) is compile-checked only, never run.
+(`arch_prctl`) is compile-checked only, never run. Shnatsel (2026-10-04) suggests upstreaming
+`as_vectors`/`as_vectors_mut` into fearless_simd as an `as_simd()` safe `align_to` wrapper, built on
+its internal bytemuck-like layer (`SimdPod`); offer a PR, with the 512-bit loop-shape note.
 
 ### 4. clflushopt stabilization report (upstream)
 **Status**: Not started. `clflushopt` target feature (rust-lang/rust#157098) and `_mm_clflushopt`
