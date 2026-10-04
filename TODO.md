@@ -1,16 +1,15 @@
 # plumb TODO
 
-This project's own tracker. It is kept separate from TMR-APP's TODO.md on purpose: if this
+This project's own tracker. It is kept separate from TMR's own tracker (not published) on purpose: if this
 succeeds, the result merges into TMR; if not, nothing here clouds TMR's list. One entry per item:
 status, decisions, next step. Background is in [PLAN.md](PLAN.md).
 
 ### 1. Owner review of the workspace
-**Status**: Ready for review (2026-10-03). Both crates built, adversarially reviewed and fixed,
-and restyled to fearless_simd's (Linebender) conventions; tests and clippy clean on stable,
-nightly and MSRV 1.89; asm gate 130/130 (bench), 8/8 (plumb_lines example, stable and nightly),
-10/10 (plumb_tiles example). Timing done (item 2).
-**Next**: the owner reviews `plumb_lines`, `plumb_tiles`, `bench/` and `bench/RESULTS.md`; then
-create the public repo `jlpetz/plumb` and push (owner approved pushing after review + timing).
+**Status**: Published 2026-10-05 at https://github.com/jlpetz/plumb. Both crates built,
+adversarially reviewed and fixed, and restyled to fearless_simd's (Linebender) conventions; tests
+and clippy clean on stable, nightly and MSRV 1.89; asm gate 130/130 (bench), 8/8 (plumb_lines
+example, stable and nightly), 10/10 (plumb_tiles example). Timing done (item 2).
+**Next**: watch the first CI runs on GitHub.
 
 ### 2. Timing runs on an idle box
 **Status**: Done 2026-10-03 (full sweep 825c9a9, verify groups re-run at 4254f13):
@@ -35,15 +34,14 @@ its internal bytemuck-like layer (`SimdPod`); offer a PR, with the 512-bit loop-
 **Next**: draft the stabilization report for #157096 (usage: TMR, plumb_lines); the owner posts.
 
 ### 5. MOVDIR64B in rustc, std_detect and stdarch (upstream)
-**Status**: Probed 2026-10-03, not started. rustc rejects `#[target_feature(enable =
-"movdir64b")]`, std_detect doesn't know it, stdarch has no intrinsic; LLVM has
-`llvm.x86.movdir64b`. `bench/probes/movdir64b.rs`: the intrinsic unrolls and folds the source
-address but the destination is a register by encoding (13 vs 20 instructions per 4 lines); the
-copy is DRAM-bound, so the gain is ergonomics (detection, `target_feature`, a documented
-intrinsic), not speed. NT stores are a different case: `asm!` there is rustc policy
-(rust-lang/rust#114582, #128149), so no compiler PR applies.
-**Next**: owner decides if it's worth sending. If yes: three patches on new branches of
-`../rust-patch` and `../stdarch-patch`, the same shape as the clflushopt commits.
+**Status**: Sent upstream 2026-10-04, with MOVDIRI added: rust-lang/rust#163742 (target
+features + `is_x86_feature_detected!`), rust-lang/stdarch#2239 (`_movdir64b`,
+`_directstoreu_u32/u64`; waits for #163742 to merge and sync), tracking issue
+rust-lang/rust#163741. `bench/probes/movdir64b.rs` found the copy DRAM-bound, so the gain is
+ergonomics, not speed. NT stores: llvm/llvm-project#228875 proposes an opaque `llvm.x86.movnt`
+so stdarch can drop `asm!` for `_mm_stream_*`.
+**Next**: answer review on #163742 and #228875; rebase #2239 after the sync; then use
+`_movdir64b` behind `nightly` in `plumb_lines::direct`.
 
 ### 6. plumb_tiles: AMX
 **Status**: Built, reviewed (16 confirmed findings, all fixed) and wired into the bench

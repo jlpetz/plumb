@@ -1,4 +1,71 @@
-/target
-/bench/results*.csv
-/bench/run*.log
+# Cargo build output. Every CARGO_TARGET_DIR used here (target/asm from bench/asm_check.py,
+# scratch target dirs) lives under it; unanchored so a stray nested target/ is covered too.
+# Cargo.lock is tracked on purpose: plumb-bench is a binary and CI uses --locked.
+target/
+**/*.rs.bk
+
+# Bench output. --csv defaults to results.csv in the current directory, so a run from the
+# workspace root lands there; logs are tee'd by hand under any name. Use `git add -f` to
+# publish one deliberately.
+results*.csv
+*.log
+
+# Compiler output from direct rustc runs (bench/probes: --emit asm / llvm-ir) and binaries.
+*.s
+*.ll
+*.o
+*.obj
+*.rlib
+*.rmeta
+*.pdb
+*.exe
+*.dll
+*.lib
+
+# rustc internal-compiler-error reports (nightly); they contain local absolute paths.
+rustc-ice-*.txt
+
+# Profiling
+*.profraw
+*.profdata
+perf.data*
+*.etl
+
+# Python
 __pycache__/
+*.py[cod]
+
+# Patches and backups
+*.patch
+*.orig
+*.rej
+*.bak
+*~
+
+# Editors and IDEs
+.vscode/
+.idea/
+.kiro/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local AI-assistant config, kept private as in TMR-APP (settings/MCP files can hold tokens
+# and local paths)
+/.claude/
+/.codex/
+/.mcp.json
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+
+# Credentials
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12

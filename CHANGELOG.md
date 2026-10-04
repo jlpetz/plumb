@@ -6,7 +6,7 @@ Subheadings to categorize changes are `added, changed, deprecated, removed, fixe
 
 -->
 
-Nothing has been published yet. The first releases will be `plumb_lines` 0.1.0 and
+Nothing has been released to crates.io yet. The first releases will be `plumb_lines` 0.1.0 and
 `plumb_tiles` 0.1.0.
 
 ## [Unreleased]

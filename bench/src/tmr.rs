@@ -315,7 +315,7 @@ tmr_wflush!(
     "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2,clflushopt"
 );
 
-/// DRAM -> DRAM line copy: 512-bit load + NT store, then sfence (shuffle-test's NT-512 path).
+/// DRAM -> DRAM line copy: 512-bit load + NT store, then sfence (an earlier TMR probe's NT-512 path).
 #[unsafe(no_mangle)]
 #[inline(never)]
 #[target_feature(enable = "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2")]
@@ -330,7 +330,7 @@ pub unsafe fn k_copynt_tmr_512(dst: *mut u64, src: *const u64, n: usize) {
     _mm_sfence();
 }
 
-/// DRAM -> DRAM line copy with MOVDIR64B (shuffle-test's asm; no stdarch intrinsic exists).
+/// DRAM -> DRAM line copy with MOVDIR64B (an earlier TMR probe's asm; no stdarch intrinsic exists).
 /// MOVDIR64B is weakly ordered like an NT store, so it needs the same sfence.
 #[unsafe(no_mangle)]
 #[inline(never)]

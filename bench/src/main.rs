@@ -1,11 +1,11 @@
 // Copyright 2026 the plumb Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! fearless-test: can fearless_simd replace TMR-APP's per-width `macro_rules!` SIMD kernels?
+//! plumb-bench: can fearless_simd replace TMR-APP's per-width `macro_rules!` SIMD kernels?
 //! (TODO 84.) Each TMR kernel shape is written twice, in `tmr.rs` (TMR's current style) and
 //! `fs.rs` (one generic fearless_simd body), and timed side by side on the same buffers.
 //!
-//! The asm verdicts come from `asm_check.py`, not from these timings (see FINDINGS.md).
+//! The asm verdicts come from `asm_check.py`, not from these timings (see FINDINGS-TODO84.md).
 //!
 //! Two regimes:
 //! - **L2**: one pinned thread, 256 KiB warm buffer. Where codegen differences show (Rule 3:
@@ -13,13 +13,13 @@
 //! - **DRAM**: thread sweep (default 1,2,4,6,8), one large-page region per thread (default
 //!   2 GiB on 1 GiB pages), threads pinned physical-cores-first. Each worker times its own pass
 //!   between barriers; the batch time is the slowest thread, aggregate = bytes / that time
-//!   (`../shuffle-test/`'s fix: no unpinned thread in the timing path, never fake-fast).
+//!   (no unpinned thread in the timing path, never fake-fast).
 //!
 //! Method (`TMR-APP/doc/simd_codegen_rules.md`, Rule 5): variants sampled round-robin so drift
 //! hits all of them; flushes and re-dirtying are untimed and outside the barriers; median and
 //! [min..max] (the full spread goes to the CSV); `black_box` on every buffer and result.
 //!
-//! Usage: fearless-test [--quick] [--regime l2|dram|both] [--only g1,g2] [--threads 1,2,4]
+//! Usage: plumb-bench [--quick] [--regime l2|dram|both] [--only g1,g2] [--threads 1,2,4]
 //!        [--per-thread-mib N] [--pages huge|large|small] [--samples N] [--cpu N] [--csv FILE]
 
 #![feature(portable_simd)]
@@ -101,7 +101,7 @@ struct Opts {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: fearless-test [--quick] [--regime l2|dram|both] [--only ids] [--threads 1,2,4,6,8]\n\
+        "usage: plumb-bench [--quick] [--regime l2|dram|both] [--only ids] [--threads 1,2,4,6,8]\n\
          \x20      [--per-thread-mib 2048] [--pages huge|large|small] [--samples 5] [--cpu 2]\n\
          \x20      [--csv results.csv]\n\
          group ids: fill verify4 posw posv lcgw flush sbnf; DRAM only: ntw wflush pfv copy\n\
@@ -1065,7 +1065,7 @@ fn main() {
     };
     let order = mem::cpu_order();
 
-    println!("fearless-test (TODO 84): TMR-style macro_rules!/std::simd vs fearless_simd 1.0");
+    println!("plumb-bench (TODO 84): TMR-style macro_rules!/std::simd vs fearless_simd 1.0");
     println!(
         "cpu: avx2={} avx512f={} clflushopt={} movdir64b={} | amx tile={} int8={} bf16={} os_xtile={}",
         cpu.avx2,

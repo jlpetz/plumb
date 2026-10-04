@@ -45,7 +45,7 @@ pub fn lcg_lanes(n: usize) -> ([u64; 8], u64, u64) {
 }
 
 /// Page-aligned, pre-touched heap buffer of `u64`s. Ordinary 4 KiB pages: no large pages, so
-/// no `SeLockMemoryPrivilege` and none of the large-page risks in the workspace CLAUDE.md.
+/// no `SeLockMemoryPrivilege` and none of the large-page risks described in `mem.rs`.
 pub struct AlignedBuf {
     ptr: *mut u64,
     len: usize,
@@ -127,7 +127,7 @@ pub fn pin_to_cpu(idx: usize) {
 #[cfg(not(windows))]
 pub fn pin_to_cpu(_idx: usize) {}
 
-/// MOVDIR64B: one 64-byte direct store from `src` to `dst` (asm from `../shuffle-test/`; stdarch
+/// MOVDIR64B: one 64-byte direct store from `src` to `dst` (asm from an earlier TMR probe; stdarch
 /// has no intrinsic). Weakly ordered, like an NT store: the caller must `sfence`.
 ///
 /// # Safety

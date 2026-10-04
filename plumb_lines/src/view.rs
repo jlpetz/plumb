@@ -9,10 +9,11 @@
 //!
 //! - **Alignment is in the type.** A `&mut u64x8<S>` is 64-byte aligned, so NT stores into it
 //!   need no runtime check ([`crate::nt`]).
-//! - **Loops over `&[V]` are pointer walks.** `for v in vectors` (and fixed-size chunks of it)
-//!   compile to base+displacement addressing. A `chunks_exact` loop over the `u64` slice
-//!   produced indexed addressing (`[r9 + 8*r10 + 64]`) instead, which cost 16% on a 512-bit
-//!   L2-resident verify (TODO 84 findings).
+//! - **Loops over `&[V]` are pointer walks** (base+displacement addressing). One loop shape to
+//!   know at 512 bits: walk an OR-accumulate verify one group of four vectors per iteration
+//!   (`while let [a, b, c, d, rest @ ..] = mid`). LLVM unrolls an `as_chunks::<4>` loop there
+//!   and reassociates the ORs, losing the fused `vpternlogq`, which cost 16% from L2
+//!   (`bench/RESULTS.md`).
 //!
 //! The split is computed from the address, not with `align_to`, whose documentation allows it
 //! to return everything as the head. Here the middle is always as long as possible.

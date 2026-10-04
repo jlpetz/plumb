@@ -1,5 +1,5 @@
 {
-  "_comment": "Expectations for bench/src/lines.rs and tmrport.rs kernels (plumb_lines and the ported TMR tests). Width rules come from the _128/_256/_512 suffix rules in asm_check.py. Twins: each plumb-style kernel's innermost loops must be within 25% of its TMR-style twin in instructions per key memory op (load, store, nt, flush, movdir64b). loop_forbid: GPR<->vector moves and lane shuffles in a positional loop mean the index vector is being rebuilt every iteration (review finding F4).",
+  "_comment": "Expectations for bench/src/lines.rs and tmrport.rs kernels (plumb_lines and the ported TMR tests). Width rules come from the _128/_256/_512 suffix rules in asm_check.py. Twins: each plumb-style kernel's innermost loops must be within 25% of its TMR-style twin in instructions per key memory op (load, store, nt, flush, movdir64b). loop_forbid: GPR<->vector moves and lane shuffles in a positional loop mean the index vector is being rebuilt every iteration.",
   "special": [],
   "expect": [
     ["^k_fillflush_", {"loop_need": ["clflushopt"], "need": ["mfence"]}],

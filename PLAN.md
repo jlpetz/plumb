@@ -26,7 +26,7 @@ Status tracking lives in [TODO.md](TODO.md). The TODO 84 evidence is in
 | AVX-512 policy | Take fearless_simd's (its `Avx512` token needs the Ice Lake set). It costs nothing for DDR5: Skylake-X/Cascade Lake/Cooper Lake are DDR4. Only matters at TMR integration. |
 | NT memory model | NT and MOVDIR64B writes happen inside closure scopes that SFENCE on exit (including unwind); the destination stays borrowed until then and writers are write-only. Rust's fences don't order NT stores (`fence(Release)` emits nothing, `fence(SeqCst)` emits `lock or`). |
 | Flush scope | `flush_after` (the owner's idea): ordinary writes, then CLFLUSHOPT of the whole borrowed range and MFENCE on exit. Not a soundness matter, so it gives plain `&mut`. |
-| Upstream compiler work | Parallel and off the critical path: a stabilization report for `clflushopt` (rust-lang/rust#157096); MOVDIR64B target feature + std_detect + stdarch intrinsic, using the workspace's clflushopt patches as templates. |
+| Upstream compiler work | Parallel and off the critical path: a stabilization report for `clflushopt` (rust-lang/rust#157096); MOVDIR64B target feature + std_detect + stdarch intrinsic, using the clflushopt PRs (rust-lang/rust#157098, rust-lang/stdarch#2141) as templates. |
 
 ## ACE vs AMX (facts from the ACE v1.15 spec and the LLVM/GCC patches)
 
@@ -52,9 +52,9 @@ Status tracking lives in [TODO.md](TODO.md). The TODO 84 evidence is in
 | P0 | Workspace, bench moved in from the probe | builds; asm gate reproduces 78/78 | done |
 | P1 | `plumb_lines`: `as_vectors`, `NtStore`, `nontemporal` scope | NT loop no worse than TMR's (now 16 vs 19 instructions); tests | done |
 | P2 | `plumb_lines`: `Clflushopt` + `flush_after`, `Movdir64b` + `direct`, `with_clflushopt!` | intrinsic/asm inlined in loops; tests | done |
-| P2b | TMR StuckBit/Refresh/SimpleNT ported in both styles | same errors under fault injection, memory checked against TMR's sequence; every plumb kernel within 25% of its TMR twin per memory op (asm gate) | done |
+| P2b | TMR StuckBit/Refresh/SimpleNT ported in both styles | same errors under fault injection, memory checked against TMR's sequence; every plumb kernel within 25% of its TMR twin per memory op (asm gate; the per-line `asm!` flush, `wflush_pltok`, is allowed 50%, documented) | done |
 | P2c | Adversarial review of plumb_lines + bench (29 raised, 26 confirmed) | all confirmed findings fixed or documented | done (2026-10-03) |
-| P3 | Upstream: clflushopt stabilization report; MOVDIR64B in rustc/std_detect/stdarch | upstream review | not started |
+| P3 | Upstream: clflushopt stabilization report; MOVDIR64B in rustc/std_detect/stdarch | upstream review | in progress: MOVDIR64B/MOVDIRI sent (rust-lang/rust#163742, rust-lang/stdarch#2239), opaque NT stores proposed (llvm/llvm-project#228875); clflushopt report not started |
 | P4 | `plumb_tiles` AMX | tests on real AMX; asm gate; review (21 raised, 16 confirmed, all fixed); timing (no bandwidth gain over zmm; `bench/RESULTS.md`) | done |
 | P4b | Style pass to fearless_simd's (Linebender) conventions; timing sweep | lint set v8 clean, fmt, headers, CI; `bench/RESULTS.md` | done (2026-10-03) |
 | P5 | ACE backend | hardware + assembler/rustc support | waiting |

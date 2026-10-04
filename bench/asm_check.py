@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""asm_check.py: the codegen gate for plumb (TMR-APP CLAUDE.md: "read the asm, don't infer
-from timing").
+"""asm_check.py: the codegen gate for plumb (rule: read the asm, don't infer codegen from
+timing).
 
 Emits Intel-syntax asm (separate target dir, so the normal build is untouched),
 then for every `k_*` kernel:
@@ -62,7 +62,7 @@ TARGET = os.path.join(ROOT, "target", "asm")
 # --------------------------------------------------------------------------------------------
 EXPECT = [
     # Byte-uniform canary: reported, never failed. A memset here is the known trap; a surviving
-    # loop is pass-order luck, not protection (see FINDINGS.md), so it is flagged as a NOTE.
+    # loop is pass-order luck, not protection (see FINDINGS-TODO84.md), so it is flagged as a NOTE.
     (r"^k_filluni_", {"canary": True}),
     (r"_128$", {"width": "xmm"}),
     (r"_256$", {"width": "ymm"}),

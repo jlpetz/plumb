@@ -1,5 +1,11 @@
 # fearless_simd vs TMR's SIMD style: findings (TODO 84)
 
+> **Correction (see `bench/RESULTS.md`, commit 4254f13):** the 16% 512-bit L2 verify gap blamed
+> below on `chunks_exact`'s indexed addressing was LLVM unrolling and reassociating the
+> OR-accumulate loop, which loses the fused `vpternlogq`. A base+displacement version was just
+> as slow; the pointer walk helped because of its loop shape. The text below is kept as the
+> record of what was measured at the time.
+
 **Date**: 2026-10-03
 **Crates**: `fearless_simd` 1.0.0, `fearless_simd_macros` 0.1.0
 **Rust**: 1.100.0-nightly (LLVM 23.1.1), baseline `x86-64-v3` (TMR's)
@@ -137,7 +143,8 @@ provably elided, and the loud-not-silent failure mode above.
 ## Timing (2026-10-03, idle box)
 
 Full output: `run.log` / `results.csv` (every cell with [min..max]), plus `run-ptr.log` /
-`results-ptr.csv` for the loop-shape follow-up. Two regimes:
+`results-ptr.csv` for the loop-shape follow-up. These came from the earlier probe and aren't
+published; the tables below are copied from them. Two regimes:
 - **L2**: one thread pinned to CPU 2, 256 KiB warm, 21 samples x 2000 reps. This is where
   codegen differences show.
 - **DRAM**: 2 GiB per thread on 1 GiB pages (16 GiB at 8 threads), threads pinned
@@ -195,7 +202,7 @@ inlined kernels; only the std::simd one changes the width.
 
 Memory-bound kernels saturate at 4 threads (one per physical core). 8 threads adds 3-8%.
 The 6-thread dip is mostly the accounting: on 4 cores, two cores carry two threads each, and the
-batch counts the slowest thread (`../shuffle-test/` saw the same). Width barely matters once
+batch counts the slowest thread (an earlier TMR probe saw the same). Width barely matters once
 saturated (Rule 3). The compute-bound LCG keeps scaling through SMT.
 
 ### Capability-token prototype (`src/cap.rs`)

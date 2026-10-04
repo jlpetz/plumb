@@ -52,14 +52,14 @@ fn tmul_fits(max_leaf: u32) -> bool {
 }
 
 /// Linux: the per-process XTILEDATA permission, requested here independently of the crate (the
-/// request is idempotent). x86_64 Linux syscall ABI; compile-checked only.
+/// request is idempotent). `x86_64` Linux syscall ABI; compile-checked only.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn os_permission() -> bool {
     let ret: i64;
     // SAFETY: arch_prctl(ARCH_REQ_XCOMP_PERM = 0x1023, XFEATURE_XTILEDATA = 18) takes two
     // integers and touches no user memory; syscall clobbers rcx and r11.
     unsafe {
-        asm!("syscall", inlateout("rax") 158i64 => ret, in("rdi") 0x1023u64, in("rsi") 18u64,
+        asm!("syscall", inlateout("rax") 158_i64 => ret, in("rdi") 0x1023_u64, in("rsi") 18_u64,
              lateout("rcx") _, lateout("r11") _, options(nostack));
     }
     ret == 0

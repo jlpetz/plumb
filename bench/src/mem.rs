@@ -159,7 +159,7 @@ pub fn alloc(bytes: usize, pages: Pages) -> Result<Region, u32> {
     };
     let size = bytes.div_ceil(page) * page;
     // LIFETIME: `req` is stored in `params` as a raw pointer that the kernel dereferences inside
-    // VirtualAlloc2, so it lives at function scope, past the call (TMR-APP's FFI pointer rule).
+    // VirtualAlloc2, so it lives at function scope, past the call (an FFI pointer stored for a later call must outlive that call).
     let mut req = MEM_ADDRESS_REQUIREMENTS {
         LowestStartingAddress: std::ptr::null_mut(),
         HighestEndingAddress: std::ptr::null_mut(),

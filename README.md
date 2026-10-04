@@ -11,7 +11,7 @@ advice from fearless_simd's maintainers to try these in extension crates first.
 | [`plumb_tiles`](plumb_tiles) | Safe x86 tile instructions: Intel AMX now (strided tile load/store from memory, INT8/BF16/FP16 dot products), designed for the x86 ACE extension later. |
 | [`bench`](bench) | The evidence: an asm gate (`asm_check.py`), equivalence tests, and a large-page thread-sweep benchmark comparing these crates with TMR's hand-written per-width kernels. |
 
-Status: experimental, `0.1`, not published. Plan and decisions: [PLAN.md](PLAN.md); tracker:
+Status: experimental, `0.1`, not yet on crates.io. Plan and decisions: [PLAN.md](PLAN.md); tracker:
 [TODO.md](TODO.md).
 
 ## What's been shown so far
@@ -24,7 +24,8 @@ Status: experimental, `0.1`, not published. Plan and decisions: [PLAN.md](PLAN.m
   NT stores per `asm!` block). The one looser kernel is a per-line `asm!` flush in a user loop,
   which costs a `lea` per line (documented). Table: [bench/CODEGEN.md](bench/CODEGEN.md).
 - **Throughput parity** ([bench/RESULTS.md](bench/RESULTS.md); 1 GiB pages, 1/2/4/6/8 threads):
-  every plumb kernel is at 98-105% of its TMR twin in DRAM, and at parity or faster from L2. One
+  every plumb kernel is at 97-105% of its TMR twin in DRAM (Refresh at 256 bits is 110-117%,
+  not yet explained: TODO 11), and at parity or faster from L2. One
   loop-shape rule came out of it: at 512 bits, walk an OR-accumulate verify one group of four
   vectors per iteration. LLVM unrolls an `as_chunks` loop there and loses the fused
   `vpternlogq`, which cost 16% from L2 (the TODO 84 runs blamed indexed addressing; it wasn't).
@@ -45,9 +46,9 @@ cargo test -p plumb_lines                          # stable
 cargo +nightly test -p plumb_lines --features nightly
 cargo test -p plumb_tiles                          # needs an AMX CPU for the hardware tests
 cargo +nightly test --release -p plumb-bench       # equivalence tests
-cd bench && python asm_check.py                    # the codegen gate (bench, nightly feature)
+cd bench && python asm_check.py --toolchain nightly # the codegen gate (bench, nightly feature)
 python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable
-cargo +nightly run --release -p plumb-bench        # benchmark: idle box, ~15 min, 1 GiB pages
+cargo +nightly run --release -p plumb-bench        # benchmark: idle box, ~25 min, 1 GiB pages
 ```
 
 The benchmark needs `SeLockMemoryPrivilege` for 1 GiB pages (or `--pages small`). It allocates

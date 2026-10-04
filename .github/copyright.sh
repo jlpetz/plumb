@@ -4,6 +4,8 @@
 # fearless_simd's .github/copyright.sh does. Files that can't carry it can be ignored with an
 # additional glob argument, e.g. -g "!src/special_file.rs".
 
+command -v rg >/dev/null 2>&1 || { echo "copyright.sh needs ripgrep (rg)" >&2; exit 2; }
+
 output=$(rg "^// Copyright (19|20)[\d]{2} (.+ and )?the plumb Authors( and .+)?$\n^// SPDX-License-Identifier: Apache-2\.0 OR MIT$\n\n" --files-without-match --multiline -g "*.rs" .)
 
 if [ -n "$output" ]; then
