@@ -206,8 +206,23 @@ macro_rules! nt_bytes {
             }
         }
     };
-    // A vector wider than the level's registers: store each register-width part.
-    ($Tok:ident, $V:ident, parts $n:literal x $arch:ty, $stream:ident) => {
+    // A vector wider than the level's registers: split it into register-width parts with
+    // fearless_simd's own `split_*` (field moves, no `transmute`) and store each part. `$halves`
+    // splits once (two parts); `quarters` splits a `u8x64` twice (four `__m128i`).
+    ($Tok:ident, $V:ident, halves $split:ident x $arch:ty, $stream:ident) => {
+        nt_bytes!(@parts $Tok, $V, $arch, $stream, |t, v| {
+            let (lo, hi) = t.$split(v);
+            [lo.into(), hi.into()]
+        });
+    };
+    ($Tok:ident, u8x64, quarters x $arch:ty, $stream:ident) => {
+        nt_bytes!(@parts $Tok, u8x64, $arch, $stream, |t, v| {
+            let (lo, hi) = t.split_u8x64(v);
+            let ((a, b), (c, d)) = (t.split_u8x32(lo), t.split_u8x32(hi));
+            [a.into(), b.into(), c.into(), d.into()]
+        });
+    };
+    (@parts $Tok:ident, $V:ident, $arch:ty, $stream:ident, |$t:ident, $v:ident| $split:block) => {
         impl sealed::Sealed for fearless_simd::$V<fearless_simd::$Tok> {}
         impl NtBytes<fearless_simd::$Tok> for fearless_simd::$V<fearless_simd::$Tok> {
             #[inline(always)]
@@ -218,17 +233,12 @@ macro_rules! nt_bytes {
                         clippy::not_unsafe_ptr_arg_deref,
                         reason = "the contract is on NtBytes::stream_bytes"
                     )]
-                    fn k(_t: $Tok, v: fearless_simd::$V<fearless_simd::$Tok>, dst: *mut $arch) {
-                        // SAFETY: the vector is `$n` contiguous `$arch` registers wide (fearless
-                        // stores it as `[$arch; $n]`); `transmute` checks the size.
-                        let parts = unsafe {
-                            core::mem::transmute::<
-                                fearless_simd::$V<fearless_simd::$Tok>,
-                                [$arch; $n],
-                            >(v)
-                        };
+                    fn k($t: $Tok, $v: fearless_simd::$V<fearless_simd::$Tok>, dst: *mut $arch) {
+                        let parts: [$arch; core::mem::size_of::<fearless_simd::$V<fearless_simd::$Tok>>()
+                            / core::mem::size_of::<$arch>()] = $split;
                         for (i, part) in parts.into_iter().enumerate() {
-                            // SAFETY: forwarded from NtBytes::stream_bytes; part i is at dst + i.
+                            // SAFETY: forwarded from NtBytes::stream_bytes; part i is the `i`th
+                            // register-width piece of the vector, so it goes to dst + i.
                             unsafe { core::arch::x86_64::$stream(dst.add(i), part) }
                         }
                     }
@@ -240,18 +250,18 @@ macro_rules! nt_bytes {
 }
 
 // The four-store blocks use the VEX/EVEX form (`vmovntdq`) where AVX is enabled, and the SSE
-// form (`movntdq`) on the SSE levels. Vectors wider than the level's registers ("parts") use the
-// trait's default `stream4_bytes`: four calls to the per-store path.
+// form (`movntdq`) on the SSE levels. Vectors wider than the level's registers (`halves`,
+// `quarters`) use the trait's default `stream4_bytes`: four calls to the per-store path.
 use core::arch::x86_64::{__m128i, __m256i, __m512i};
 nt_bytes!(Sse2, u8x16, native __m128i, _mm_stream_si128, "movntdq xmmword ptr" xmm_reg 16);
-nt_bytes!(Sse2, u8x32, parts 2 x __m128i, _mm_stream_si128);
-nt_bytes!(Sse2, u8x64, parts 4 x __m128i, _mm_stream_si128);
+nt_bytes!(Sse2, u8x32, halves split_u8x32 x __m128i, _mm_stream_si128);
+nt_bytes!(Sse2, u8x64, quarters x __m128i, _mm_stream_si128);
 nt_bytes!(Sse4_2, u8x16, native __m128i, _mm_stream_si128, "movntdq xmmword ptr" xmm_reg 16);
-nt_bytes!(Sse4_2, u8x32, parts 2 x __m128i, _mm_stream_si128);
-nt_bytes!(Sse4_2, u8x64, parts 4 x __m128i, _mm_stream_si128);
+nt_bytes!(Sse4_2, u8x32, halves split_u8x32 x __m128i, _mm_stream_si128);
+nt_bytes!(Sse4_2, u8x64, quarters x __m128i, _mm_stream_si128);
 nt_bytes!(Avx2, u8x16, native __m128i, _mm_stream_si128, "vmovntdq xmmword ptr" xmm_reg 16);
 nt_bytes!(Avx2, u8x32, native __m256i, _mm256_stream_si256, "vmovntdq ymmword ptr" ymm_reg 32);
-nt_bytes!(Avx2, u8x64, parts 2 x __m256i, _mm256_stream_si256);
+nt_bytes!(Avx2, u8x64, halves split_u8x64 x __m256i, _mm256_stream_si256);
 nt_bytes!(Avx512, u8x16, native __m128i, _mm_stream_si128, "vmovntdq xmmword ptr" xmm_reg 16);
 nt_bytes!(Avx512, u8x32, native __m256i, _mm256_stream_si256, "vmovntdq ymmword ptr" ymm_reg 32);
 nt_bytes!(Avx512, u8x64, native __m512i, _mm512_stream_si512, "vmovntdq zmmword ptr" zmm_reg 64);

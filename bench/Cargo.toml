@@ -24,3 +24,7 @@ windows-sys = { version = "0.61", features = [
 # to the library crates.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "allow"
+
+[lints.clippy]
+# TMR's kernels convert between std::simd and arch types with `transmute`; the ports keep that.
+disallowed_methods = "allow"

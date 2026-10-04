@@ -8,3 +8,12 @@
 trivial-copy-size-limit = 16
 
 # END LINEBENDER LINT SET
+
+# As in fearless_simd: no transmutes. plumb has none; for SIMD conversions use fearless_simd's own
+# API (`split_*`/`combine_*`, `From` conversions to and from the arch types).
+disallowed-methods = [
+  { path = "core::mem::transmute", reason = "Use fearless_simd's split/combine and From conversions." },
+  { path = "std::mem::transmute", reason = "Use fearless_simd's split/combine and From conversions." },
+  { path = "core::mem::transmute_copy", reason = "Use fearless_simd's split/combine and From conversions." },
+  { path = "std::mem::transmute_copy", reason = "Use fearless_simd's split/combine and From conversions." },
+]
