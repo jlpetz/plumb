@@ -119,8 +119,10 @@ fn copied_feature_lists_are_sound() {
 /// `fearless_simd`'s own `Avx2`/`Avx512` target-feature lists, read from the source of the
 /// `fearless_simd` 1.0.0 this crate builds against (located with `cargo metadata`).
 fn fearless_lists() -> Option<(String, String)> {
+    // Not `--offline`: metadata resolves the whole workspace, and a `-p plumb_lines` build doesn't
+    // download the bench's Windows-only dependencies, so a fresh CI runner would fail here.
     let out = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline"])
+        .args(["metadata", "--format-version", "1", "--locked"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .ok()?;
