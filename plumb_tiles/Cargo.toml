@@ -13,5 +13,11 @@ repository.workspace = true
 
 [dependencies]
 
+[features]
+default = []
+# Use stdarch's AMX intrinsics (unstable: `x86_amx_intrinsics`, rust-lang/rust#126622) instead
+# of `asm!`. Nightly only. Same API and instructions; see the crate docs' Toolchains section.
+nightly = []
+
 [lints]
 workspace = true

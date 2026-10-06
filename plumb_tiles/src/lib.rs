@@ -9,9 +9,8 @@
 //! the main feature. The AMX dot-product instructions are here too, mainly as a dense
 //! power/heat load.
 //!
-//! Stable Rust: every AMX instruction is an `asm!` block with the tile number as a `const`
-//! operand, so no target feature or nightly intrinsic is involved (an ACE backend can't keep all
-//! of that; see [ACE roadmap](#ace-roadmap)). `x86_64` with 64-bit pointers only (see
+//! Every AMX instruction is an `asm!` block on stable Rust, or stdarch's intrinsic with the
+//! `nightly` feature (see [Toolchains](#toolchains)). `x86_64` with 64-bit pointers only (see
 //! [Platforms](#platforms)); on other targets only the shape constants are defined.
 //!
 //! # Model
@@ -22,6 +21,8 @@
 //!    [`int8`](Amx::int8), [`bf16`](Amx::bf16) and [`fp16`](Amx::fp16).
 //! 2. **A session**: [`Amx::with_tiles`] configures the tiles (`LDTILECFG`), runs a closure with
 //!    a [`Tiles`] handle and releases them (`TILERELEASE`) when the closure returns or unwinds.
+//!    Code that computes opens it from the compute token instead, [`AmxInt8::with_tiles`] and so
+//!    on: the same session, which with the `nightly` feature also enables those instructions.
 //! 3. **Tile registers are types**, [`T0`]..[`T7`], because the register number is part of the
 //!    instruction encoding: `t.load::<T0>(buf, 64)`.
 //!
@@ -79,7 +80,8 @@
 //! types, `B[2k + i][n]` at element `2n + i`). `C`, `A` and `B` must be three different tiles
 //! (the ISA raises `#UD` otherwise), which is checked at compile time; [`Tiles`] shows the
 //! error. The check fires when the call is monomorphized, so `cargo build` reports it and
-//! `cargo check` may not.
+//! `cargo check` may not. Open a session that computes from the compute token,
+//! `int8.with_tiles(..)` (see [Toolchains](#toolchains)).
 //!
 //! # Why the tile operations are safe
 //!
@@ -111,6 +113,73 @@
 //! touches less than was bounds-checked (on every AMX CPU so far, palette 1 can't be
 //! configured larger than the 16 x 64 used here) or, if the tiles were released, raises `#UD`
 //! and the process dies.
+//!
+//! # Toolchains
+//!
+//! On stable, every tile instruction is an `asm!` block with the tile number as a `const`
+//! operand. No target feature is involved, so the methods inline anywhere (an ACE backend
+//! can't keep all of that; see [ACE roadmap](#ace-roadmap)).
+//!
+//! The `nightly` feature uses stdarch's AMX intrinsics instead (`x86_amx_intrinsics`,
+//! rust-lang/rust#126622), so the crate is ready for them to stabilize. The API is the same.
+//! The intrinsics carry `#[target_feature]`, so each session runs inside a function that
+//! enables the features its token proves: [`Amx::with_tiles`] enables AMX-TILE, and
+//! [`AmxInt8::with_tiles`] (likewise BF16 and FP16) adds that compute set. Code inlined into the
+//! session closure gets the intrinsics inlined, and LLVM's runtime unroller can unroll loops of
+//! them, which it won't do for a loop containing `asm!` (it counts as a call).
+//!
+//! ## Calling practices (nightly)
+//!
+//! From a caller compiled without those features the session function is called, not inlined,
+//! and LLVM assumes every AMX intrinsic may write any memory it can reach. A value the closure
+//! captured by reference then lives in memory and is reloaded after every tile instruction: a
+//! loop of tile loads with a runtime stride and step goes from 10 to 19 instructions per tile
+//! and runs about 10% slower from L2 (the workspace's `bench/RESULTS.md`). Either of two
+//! practices avoids it, and both measured the same as `asm!`:
+//!
+//! 1. **Capture by value.** Write `move |t| ..`, or copy the captured values into locals at the
+//!    top of the closure. Return results from the closure instead of updating a captured
+//!    counter (a `move` closure would update its own copy), and reborrow a `&mut` buffer you
+//!    still need after the session (`let b = &mut *buf;`), since `move` takes it.
+//! 2. **Call from a function compiled with the AMX features**, the way a TMR kernel is a
+//!    `#[target_feature]` function: add `amx-tile` to its features (plus `amx-int8`, `amx-bf16`
+//!    or `amx-fp16` for `TDP*` code). The session inlines into it and by-reference captures cost
+//!    nothing. On nightly the `amx-*` names need `#![feature(x86_amx_intrinsics)]` in your crate,
+//!    and on stable the attribute can't name them at all, so gate it
+//!    (`#[cfg_attr(feature = "nightly", target_feature(enable = "amx-tile"))]`); the `asm!` path
+//!    inlines anyway. Calling the function is `unsafe`: enable only what your tokens prove.
+//!
+//! ```ignore
+//! // Nightly, with #![feature(x86_amx_intrinsics)] in this crate.
+//! #[target_feature(enable = "amx-tile")]
+//! fn read_tiles(amx: Amx, buf: &[u64], stride: usize, step: usize, tiles: usize) {
+//!     amx.with_tiles(|t| {
+//!         for i in 0..tiles {
+//!             t.load_u64::<T0>(&buf[i * step..], stride);
+//!         }
+//!     });
+//! }
+//!
+//! // SAFETY: `amx` proves AMX-TILE, the only feature `read_tiles` enables.
+//! unsafe { read_tiles(amx, &buf, 4096, 512, 16) };
+//! ```
+//!
+//! The rest of the nightly path:
+//!
+//! - **Open `TDP*` sessions from the compute token**, `int8.with_tiles(..)`. In an
+//!   [`Amx::with_tiles`] session each `TDP*` is an out-of-line call.
+//! - **Helpers that take `&mut Tiles` must inline** (`#[inline(always)]`); one that doesn't is
+//!   a call per instruction.
+//! - **Other target features: use practice 2 with all of them.** A closure written in a
+//!   `#[target_feature]` function (or `fearless_simd`'s `kernel!`) that lacks the AMX features
+//!   inherits that function's features, so it can't inline into the session and each tile
+//!   instruction is a call. In a `#[simd]` function the body has no features of its own, so the
+//!   tile instructions inline and the closure's SIMD operations become calls instead. A session
+//!   mixing compute sets (INT8 and BF16) has the same problem for one of them. Enable everything
+//!   the code uses in one `#[target_feature]` function around an `#[inline(always)]` body:
+//!   `fearless_simd`'s exact list for the level (as `plumb_lines`' `entry` module copies it)
+//!   plus `amx-tile` and the compute sets used. The workspace's `bench/src/tiles.rs` does this
+//!   for its AVX-512 verify (`k_amx_verify_512`).
 //!
 //! # Platforms
 //!
@@ -189,8 +258,16 @@
 //! Also not here yet: AMX-COMPLEX (`TCMMIMFP16PS`, `TCMMRLFP16PS`; this crate's test machine
 //! lacks it), and the later AMX extensions (AMX-FP8, AMX-TF32, AMX-MOVRS, and AMX-AVX512,
 //! enumerated in leaf 1Eh.1, whose row reads are shared with ACE as above). Each would be a new
-//! token plus methods. stdarch has AMX intrinsics behind the unstable `x86_amx_intrinsics`
-//! feature (rust-lang/rust#126622); this crate doesn't use them, so it builds on stable.
+//! token plus methods, in both forms (see [Toolchains](#toolchains)).
+
+#![cfg_attr(
+    all(
+        feature = "nightly",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
+    ),
+    feature(x86_amx_intrinsics)
+)]
 
 /// Rows in every tile.
 pub const ROWS: usize = 16;
@@ -222,6 +299,8 @@ pub const fn tile_span(stride: usize) -> Option<usize> {
 // pointers and `usize` would reach `asm!` in registers the instructions read as 64-bit.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 mod detect;
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+mod insn;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 mod reg;
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]

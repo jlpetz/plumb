@@ -127,6 +127,29 @@ pub fn panic_message(f: impl FnOnce()) -> String {
     }
 }
 
+/// Runs `f`, which must panic, and returns the location the panic reports.
+pub fn panic_location(f: impl FnOnce()) -> (String, u32) {
+    thread_local! {
+        static SEEN: std::cell::RefCell<Option<(String, u32)>> = const { std::cell::RefCell::new(None) };
+    }
+    // One hook for the whole binary, installed once and chaining to the default one. It records
+    // into the panicking thread's slot, so tests panicking on other threads don't interfere.
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(l) = info.location() {
+                SEEN.with(|s| *s.borrow_mut() = Some((l.file().to_owned(), l.line())));
+            }
+            default(info);
+        }));
+    });
+    SEEN.with(|s| s.borrow_mut().take());
+    catch_unwind(AssertUnwindSafe(f)).expect_err("expected a panic");
+    SEEN.with(|s| s.borrow_mut().take())
+        .expect("the panic hook saw the panic")
+}
+
 /// STTILECFG: the live tile configuration of this thread (all zero when released).
 pub fn tile_config(_: Amx) -> [u8; 64] {
     let mut cfg = [0xEE_u8; 64];

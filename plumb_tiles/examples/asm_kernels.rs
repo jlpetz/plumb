@@ -177,7 +177,8 @@ pub(crate) mod kernels {
     /// `stride`, the `i`-th starting `i * step` words into `buf`. With stride and step known
     /// only at run time, each load keeps its bounds checks (compares in the loop, panic paths
     /// outside it), which is what this kernel shows `asm_check` that the constant-stride ones
-    /// can't. Stores the last tile read to `last`.
+    /// can't. Stores the last tile read to `last`. The closure is `move`: with the `nightly`
+    /// feature, values it captured by reference would be reloaded after every tile load.
     ///
     /// # Panics
     ///
@@ -192,7 +193,7 @@ pub(crate) mod kernels {
         tiles: usize,
         last: &mut [u64; TILE_WORDS],
     ) {
-        amx.with_tiles(|t| {
+        amx.with_tiles(move |t| {
             for i in 0..tiles {
                 t.load_u64::<T0>(&buf[i * step..], stride);
             }
@@ -201,7 +202,8 @@ pub(crate) mod kernels {
     }
 
     /// The store side of [`k_tile_rt_stride_load`], on a byte buffer: `tiles` copies of
-    /// `pattern` at byte `stride`, the `i`-th starting `i * step` bytes into `buf`.
+    /// `pattern` at byte `stride`, the `i`-th starting `i * step` bytes into `buf`. `move` for
+    /// the same reason.
     ///
     /// # Panics
     ///
@@ -216,7 +218,7 @@ pub(crate) mod kernels {
         step: usize,
         tiles: usize,
     ) {
-        amx.with_tiles(|t| {
+        amx.with_tiles(move |t| {
             t.load::<T3>(pattern, ROW_BYTES);
             for i in 0..tiles {
                 t.store::<T3>(&mut buf[i * step..], stride);
@@ -236,7 +238,7 @@ pub(crate) mod kernels {
         c: &mut [[u8; TILE_BYTES]; 4],
         iters: usize,
     ) {
-        i8.amx().with_tiles(|t| {
+        i8.with_tiles(|t| {
             t.load::<T4>(&a[0], ROW_BYTES);
             t.load::<T5>(&a[1], ROW_BYTES);
             t.load::<T6>(&b[0], ROW_BYTES);
@@ -269,7 +271,7 @@ pub(crate) mod kernels {
         c: &mut [u8; TILE_BYTES],
         iters: usize,
     ) {
-        bf16.amx().with_tiles(|t| {
+        bf16.with_tiles(|t| {
             t.load::<T1>(a, ROW_BYTES);
             t.load::<T2>(b, ROW_BYTES);
             t.zero::<T0>();
@@ -290,7 +292,7 @@ pub(crate) mod kernels {
         c: &mut [u8; TILE_BYTES],
         iters: usize,
     ) {
-        fp16.amx().with_tiles(|t| {
+        fp16.with_tiles(|t| {
             t.load::<T1>(a, ROW_BYTES);
             t.load::<T2>(b, ROW_BYTES);
             t.zero::<T0>();

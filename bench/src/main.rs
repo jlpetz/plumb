@@ -25,6 +25,7 @@
 #![feature(portable_simd)]
 #![feature(clflushopt_target_feature)]
 #![feature(simd_x86_clflushopt)]
+#![feature(x86_amx_intrinsics)] // `amx-tile` in k_amx_verify_512's target features
 
 mod cap;
 mod common;

@@ -21,6 +21,12 @@ amx.with_tiles(|t| {                                   // LDTILECFG ... TILERELE
 
 - **Stable Rust**: every AMX instruction is an `asm!` block. No target features, no nightly.
   (An ACE backend will need AVX-512 where it's called; the crate docs explain why.)
+- **Nightly intrinsics**: the `nightly` feature uses stdarch's AMX intrinsics instead, with the
+  same API, so the crate is ready for them to stabilize. Each session enables the AMX features
+  its token proves, so tile ops in the closure inline and LLVM can unroll loops of them. Use the
+  compute token's `with_tiles` (`int8.with_tiles(..)`) for `TDP*` code. To match `asm!` speed,
+  capture by value (`move |t| ..`) or call from a function compiled with `amx-tile` (the crate
+  docs' calling practices).
 - **One tile shape**: all eight tiles are always 16 rows x 64 bytes. That's the largest AMX
   shape and the only ACE shape.
 - **Safe**: tokens prove CPU and OS support. A closure-scoped session configures the tiles and
@@ -37,7 +43,7 @@ compares with ACE, including the roadmap for an ACE backend.
 ## Minimum supported Rust Version (MSRV)
 
 This version of plumb_tiles has been verified to compile with **Rust 1.89** and later, the same MSRV
-as fearless_simd 1.0. x86_64 only.
+as fearless_simd 1.0. x86_64 only. The `nightly` feature needs a nightly toolchain.
 
 Future versions might increase the Rust version requirement. This will be accompanied by a minor
 version bump.

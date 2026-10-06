@@ -20,6 +20,7 @@ Usage:
   python asm_check.py --dump k_verify4_fs_512   # print that kernel's loops (and callees)
   python asm_check.py --density     # also print instructions per key memory op (twin metric)
   python asm_check.py --package plumb_tiles --example asm_kernels   # check a crate's example
+  python asm_check.py --package plumb_tiles --example asm_kernels --toolchain nightly --features nightly
   python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable
 Extra expectations and special instructions are loaded from expect/*.json (one file per
 module), so modules can be added without editing this script:
@@ -52,7 +53,8 @@ TARGET = os.path.join(ROOT, "target", "asm")
 #   stack_ok: reason; vector stack operands in loops are intended (e.g. an L1 scratch buffer),
 #            not spills
 #   twin:    a re.sub template on the matched name giving the TMR-style twin kernel; for every
-#            key memory op kind in the twin's innermost loops (load, store, nt, flush, movdir64b)
+#            key memory op kind in the twin's innermost loops (load, store, nt, flush, movdir64b,
+#            tile)
 #            this kernel's best innermost loop may use at most `twin_tol` (default 0.25) more
 #            instructions per op
 #   max_per_op: {kind: n}: this kernel's best innermost loop may use at most n instructions per
@@ -350,11 +352,14 @@ FLUSH_OPS = ("clflushopt", "clflush", "clwb")
 
 
 def mem_kind(txt):
-    """The key memory op an instruction is ('nt', 'store', 'load', 'flush', 'movdir64b'), or None.
-    Stack ([rsp]) and constant ([rip]) operands don't count: they're overhead, not traffic."""
+    """The key memory op an instruction is ('nt', 'store', 'load', 'flush', 'movdir64b', 'tile'),
+    or None. Stack ([rsp]) and constant ([rip]) operands don't count: they're overhead, not
+    traffic."""
     op = txt.split()[0]
     if op in NT_OPS:
         return "nt"
+    if op in ("tileloadd", "tileloaddt1", "tilestored"):
+        return "tile" if "[rsp" not in txt else None
     if op in FLUSH_OPS:
         return "flush"
     if op == "movdir64b":
@@ -554,8 +559,9 @@ def main():
     load_expect_files()
     cargo_target, stem = target_spec(args)
     toolchain = args[args.index("--toolchain") + 1] if "--toolchain" in args else None
+    features = ["--features", args[args.index("--features") + 1]] if "--features" in args else []
     if "--no-build" not in args:
-        build(cargo_target, toolchain)
+        build(cargo_target + features, toolchain)
     path = latest_s(stem, cargo_target[1])
     funcs = parse(path)
     kernels = sorted(n for n in funcs if n.startswith("k_"))

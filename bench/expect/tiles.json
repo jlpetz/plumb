@@ -1,4 +1,5 @@
 {
+  "_comment": "Expectations for plumb_tiles/examples/asm_kernels.rs, on both backends: python asm_check.py --package plumb_tiles --example asm_kernels --toolchain stable, and --toolchain nightly --features nightly. The runtime-geometry kernels are pinned at the 10 instructions per tile both give with a `move` closure; a by-reference capture on the intrinsic path reloads stride and step after every tile op (19).",
   "special": [
     "sttilecfg", "ldtilecfg", "tilerelease", "tilezero", "tileloadd", "tileloaddt1", "tilestored",
     "tdpbssd", "tdpbsud", "tdpbusd", "tdpbuud", "tdpbf16ps", "tdpfp16ps"
@@ -10,8 +11,8 @@
     ["^k_tile_stride_load$", {"loop_need": ["tileloadd"]}],
     ["^k_tile_stride_load_t1$", {"loop_need": ["tileloaddt1"]}],
     ["^k_tile_stride_fill$", {"loop_need": ["tilestored"]}],
-    ["^k_tile_rt_stride_load$", {"loop_need": ["tileloadd"]}],
-    ["^k_tile_rt_stride_store$", {"loop_need": ["tilestored"]}],
+    ["^k_tile_rt_stride_load$", {"loop_need": ["tileloadd"], "max_per_op": {"tile": 10}}],
+    ["^k_tile_rt_stride_store$", {"loop_need": ["tilestored"], "max_per_op": {"tile": 10}}],
     ["^k_tile_dpbssd$", {"loop_need": ["tdpbssd"]}],
     ["^k_tile_dpbf16ps$", {"loop_need": ["tdpbf16ps"]}],
     ["^k_tile_dpfp16ps$", {"loop_need": ["tdpfp16ps"]}]

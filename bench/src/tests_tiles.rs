@@ -20,6 +20,17 @@ fn amx() -> Option<Amx> {
     a
 }
 
+/// `k_amx_verify_512` enables fearless_simd's Avx512 list plus `amx-tile`. plumb_lines' copy of
+/// that list (plus `clflushopt`) is checked against fearless_simd's source by plumb_lines'
+/// `nightly_entry` test, so matching it here ties this one to the source too.
+#[test]
+fn avx512_amx_features_are_fearless_avx512_plus_amx_tile() {
+    let fearless = plumb_lines::entry::AVX512_FEATURES
+        .strip_suffix(",clflushopt")
+        .expect("plumb_lines' list ends with clflushopt");
+    assert_eq!(tiles::AVX512_AMX_FEATURES, format!("{fearless},amx-tile"));
+}
+
 fn buf(n: usize) -> Vec<Line> {
     vec![Line([0; 8]); n.div_ceil(8)]
 }

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use plumb_tiles::{Amx, ROW_BYTES, T0, T2, T3, T5, TILE_BYTES};
 
-use crate::{Lcg, amx_or_skip, expected_config, panic_message, tile_config};
+use crate::{Lcg, amx_or_skip, expected_config, panic_location, panic_message, tile_config};
 
 /// A load/store round trip in a fresh session: proves the thread can use tiles again.
 fn round_trip(amx: Amx, seed: u64) {
@@ -107,6 +107,79 @@ fn nested_session_panics_and_the_outer_one_is_released() {
         "the unwind released the outer session"
     );
     round_trip(amx, 1);
+}
+
+/// The compute tokens' `with_tiles` is the same session (with the `nightly` feature it also
+/// enables the compute set): same configuration, released after, and it nests with `Amx`
+/// sessions in neither order.
+#[test]
+fn compute_token_sessions_behave_like_amx_sessions() {
+    let Some(amx) = amx_or_skip("compute_token_sessions_behave_like_amx_sessions") else {
+        return;
+    };
+    let mut checked = 0;
+    let mut check = |name: &str, open: &dyn Fn(&mut dyn FnMut()), nested: &dyn Fn()| {
+        let mut inside = [0_u8; 64];
+        open(&mut || inside = tile_config(amx));
+        assert_eq!(inside, expected_config(), "{name}: configuration inside");
+        assert_eq!(tile_config(amx), [0; 64], "{name}: released after");
+        let msg = panic_message(nested);
+        assert!(
+            msg.contains("nested with_tiles"),
+            "{name}: unexpected panic: {msg}"
+        );
+        let msg = panic_message(|| open(&mut || amx.with_tiles(|_| ())));
+        assert!(
+            msg.contains("nested with_tiles"),
+            "{name}: unexpected panic: {msg}"
+        );
+        assert_eq!(
+            tile_config(amx),
+            [0; 64],
+            "{name}: released after the unwinds"
+        );
+        checked += 1;
+    };
+    if let Some(i8) = amx.int8() {
+        check("int8", &|f| i8.with_tiles(|_| f()), &|| {
+            amx.with_tiles(|_| i8.with_tiles(|_| ()));
+        });
+    }
+    if let Some(bf16) = amx.bf16() {
+        check("bf16", &|f| bf16.with_tiles(|_| f()), &|| {
+            amx.with_tiles(|_| bf16.with_tiles(|_| ()));
+        });
+    }
+    if let Some(fp16) = amx.fp16() {
+        check("fp16", &|f| fp16.with_tiles(|_| f()), &|| {
+            amx.with_tiles(|_| fp16.with_tiles(|_| ()));
+        });
+    }
+    if checked == 0 {
+        eprintln!("skip: compute_token_sessions_behave_like_amx_sessions: no AMX compute set");
+    }
+    round_trip(amx, 4);
+}
+
+/// The session's panics point at the caller's line: `#[track_caller]` holds through every
+/// layer, including the `nightly` feature's target-feature wrappers.
+#[test]
+fn session_panics_report_the_callers_location() {
+    let Some(amx) = amx_or_skip("session_panics_report_the_callers_location") else {
+        return;
+    };
+    let here = |line| (file!().to_owned(), line);
+    let line = line!() + 1;
+    let at = panic_location(|| amx.with_tiles(|_| amx.with_tiles(|_| ())));
+    assert_eq!(at, here(line), "nested Amx session");
+    let line = line!() + 1;
+    let at = panic_location(|| amx.with_tiles(|t| t.load::<T0>(&[], 0)));
+    assert_eq!(at, here(line), "out-of-bounds load");
+    if let Some(i8) = amx.int8() {
+        let line = line!() + 1;
+        let at = panic_location(|| i8.with_tiles(|_| i8.with_tiles(|_| ())));
+        assert_eq!(at, here(line), "nested int8 session");
+    }
 }
 
 /// A nested attempt must panic before touching the outer configuration: code that catches the

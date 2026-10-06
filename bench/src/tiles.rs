@@ -14,7 +14,6 @@
 use crate::common::*;
 use fearless_simd::prelude::*;
 use fearless_simd::{Avx512, u64x8};
-use fearless_simd_macros::simd;
 use plumb_lines::Line;
 use plumb_tiles::{Amx, ROW_BYTES, ROWS, T0, T1, T2, T3};
 
@@ -136,8 +135,12 @@ pub unsafe fn k_amx_strided_read_zmm_512(p: *const u64, n: usize) -> u64 {
 
 /// Verify through tiles: tile-load a 1 KiB block from DRAM, store it to an L1 scratch, then
 /// XOR/OR the scratch rows against the pattern with zmm (4 accumulators). Returns 1 on mismatch.
-#[simd]
-pub fn amx_verify<S: Simd>(simd: S, amx: Amx, buf: &[u64], pat: u64) -> u64 {
+///
+/// Not `#[simd]`: its body closure carries no target features, so inside plumb_tiles' AMX
+/// session (amx-tile only) every fearless AVX-512 op would be an out-of-line call.
+/// `k_amx_verify_512` compiles it with both sets instead.
+#[inline(always)]
+fn amx_verify<S: Simd>(simd: S, amx: Amx, buf: &[u64], pat: u64) -> u64 {
     let mut scratch = [Line([0; 8]); ROWS];
     let p = u64x8::splat(simd, pat);
     let z = u64x8::splat(simd, 0);
@@ -167,8 +170,29 @@ pub fn amx_verify<S: Simd>(simd: S, amx: Amx, buf: &[u64], pat: u64) -> u64 {
     ((a0 | a1) | (a2 | a3)).simd_eq(z).any_false() as u64
 }
 
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub fn k_amx_verify_512(t5: Avx512, amx: Amx, buf: &[u64]) -> u64 {
-    amx_verify(t5, amx, buf, PATTERN)
+/// `k_amx_verify_512` and the feature list it enables, written once so the test can check the
+/// list (`tests_tiles.rs`).
+macro_rules! avx512_amx_entry {
+    ($features:literal) => {
+        /// fearless_simd 1.0.0's `Avx512` target features plus `amx-tile`.
+        #[cfg(test)]
+        pub const AVX512_AMX_FEATURES: &str = $features;
+
+        #[unsafe(no_mangle)]
+        #[inline(never)]
+        pub fn k_amx_verify_512(t5: Avx512, amx: Amx, buf: &[u64]) -> u64 {
+            #[inline]
+            #[target_feature(enable = $features)]
+            fn inner(t5: Avx512, amx: Amx, buf: &[u64]) -> u64 {
+                amx_verify(t5, amx, buf, PATTERN)
+            }
+            // SAFETY: `t5` proves fearless_simd's Avx512 list and `amx` proves AMX-TILE,
+            // exactly the features `inner` enables.
+            unsafe { inner(t5, amx, buf) }
+        }
+    };
 }
+
+avx512_amx_entry!(
+    "fxsr,adx,aes,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,cmpxchg16b,fma,gfni,lzcnt,movbe,pclmulqdq,popcnt,rdrand,rdseed,sha,vaes,vpclmulqdq,xsave,xsavec,xsaveopt,xsaves,amx-tile"
+);

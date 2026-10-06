@@ -10,7 +10,7 @@ license.workspace = true
 fearless_simd.workspace = true
 fearless_simd_macros.workspace = true
 plumb_lines = { path = "../plumb_lines", features = ["nightly"] }
-plumb_tiles = { path = "../plumb_tiles" }
+plumb_tiles = { path = "../plumb_tiles", features = ["nightly"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

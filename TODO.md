@@ -38,17 +38,29 @@ its internal bytemuck-like layer (`SimdPod`); offer a PR, with the 512-bit loop-
 features + `is_x86_feature_detected!`), rust-lang/stdarch#2239 (`_movdir64b`,
 `_directstoreu_u32/u64`; waits for #163742 to merge and sync), tracking issue
 rust-lang/rust#163741. `bench/probes/movdir64b.rs` found the copy DRAM-bound, so the gain is
-ergonomics, not speed. NT stores: llvm/llvm-project#228875 proposes an opaque `llvm.x86.movnt`
-so stdarch can drop `asm!` for `_mm_stream_*`.
-**Next**: answer review on #163742 and #228875; rebase #2239 after the sync; then use
-`_movdir64b` behind `nightly` in `plumb_lines::direct`.
+ergonomics, not speed. #163742 merged 2026-10-04; #2239 waits for stdarch's rustc sync
+(#2240). NT stores: llvm/llvm-project#228875 proposes an opaque `llvm.x86.movnt`; RKSimon
+prefers fixing `!nontemporal` itself, and jyknight's llvm/llvm-project#229240 does that (an x86
+pass inserts SFENCE, keeping `!nontemporal` a hint). Tested and reviewed 2026-10-06: plumb's
+fill loops keep MOVNT, unroll and get one SFENCE at the exit; posted a funclet-EH bug and the
+cost of per-iteration fences. Plan: close #228875 once #229240 lands, unless reviewers want both.
+**Next**: re-run #2239's CI once #2240 merges; when #229240 lands, take the Rust side to Rust
+(rustc's `nontemporal_store` and stdarch's `_mm_stream_*` back to `!nontemporal` on x86); then
+use `_movdir64b` behind `nightly` in `plumb_lines::direct`.
 
 ### 6. plumb_tiles: AMX
 **Status**: Built, reviewed (16 confirmed findings, all fixed) and wired into the bench
-(2026-10-03); timing is item 2.
-**Next**: after the timing run, the TMR TODO 86 probe: does a 16-row x 8-byte AMX tile store beat
-AVX-512 scatter for TM5's strided u64 writes? Raw asm first; only add shapes to the crate if it
-wins.
+(2026-10-03); timing is item 2. 2026-10-05: the `nightly` feature uses stdarch's AMX intrinsics
+(owner decision: be ready when they stabilize); asm gate 10/10 on stable and nightly, bench
+130/130. The bench's AMX groups now build through the intrinsics: LLVM unrolls their loops, and
+`amx_verify_512`'s zmm check became the fused `vpternlogq` form (21 vs 29 instructions per
+tile). Re-timed 2026-10-05 (RESULTS.md, last section): intrinsics = `asm!` in DRAM and from
+L1/L2, except by-reference closure captures in an ordinary caller, ~10% slower from L2.
+Documented as two calling practices (capture by value, or call from an `amx-tile` function);
+both measured equal to `asm!`. LLVM fix for the intrinsics' memory effects sent as
+llvm/llvm-project#229025 (approved by phoebewang 2026-10-05; plumb doesn't depend on it).
+**Next**: the TMR TODO 86 probe: does a 16-row x 8-byte AMX tile store beat AVX-512 scatter for
+TM5's strided u64 writes? Raw asm first; only add shapes to the crate if it wins.
 
 ### 7. ACE backend
 **Status**: Waiting: no hardware; LLVM PRs open (llvm-project#208408/#208706), nothing in rustc.

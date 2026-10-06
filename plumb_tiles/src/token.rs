@@ -90,7 +90,9 @@ macro_rules! compute_token {
                 Self { amx: unsafe { Amx::assume_supported() } }
             }
 
-            /// The tile-architecture token this one implies, for [`Amx::with_tiles`].
+            /// The tile-architecture token this one implies. A session that uses this token's
+            /// instructions should come from its own `with_tiles` instead (see
+            /// [Toolchains](crate#toolchains)).
             #[must_use]
             pub const fn amx(self) -> Amx {
                 self.amx

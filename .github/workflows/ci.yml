@@ -66,7 +66,7 @@ jobs:
           components: clippy
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked --features plumb_lines/nightly -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --features plumb_lines/nightly,plumb_tiles/nightly -- -D warnings
 
   test:
     name: cargo test
@@ -95,6 +95,15 @@ jobs:
 
       - name: cargo test (plumb_lines nightly feature)
         run: cargo test -p plumb_lines --features nightly --locked --no-fail-fast
+
+      # Compile-checked here: the runners have no AMX, so the hardware tests skip.
+      - name: cargo test (plumb_tiles nightly feature)
+        run: cargo test -p plumb_tiles --features nightly --locked --no-fail-fast
+
+      - name: cargo doc (nightly features)
+        run: cargo doc -p plumb_lines -p plumb_tiles --features plumb_lines/nightly,plumb_tiles/nightly --locked --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
       - name: cargo test (bench equivalence tests)
         run: cargo test -p plumb-bench --release --locked --no-fail-fast

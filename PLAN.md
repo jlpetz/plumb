@@ -16,7 +16,7 @@ Status tracking lives in [TODO.md](TODO.md). The TODO 84 evidence is in
 |---|---|
 | Structure | Two crates, `plumb_lines` and `plumb_tiles`, plus a TMR-internal integration module later (not a third crate). `bench/` holds the asm gate, equivalence tests and the thread-sweep harness. |
 | Repo | Its own repo, public from the start (`jlpetz/plumb`). Created and pushed only after the owner has reviewed it. |
-| Toolchain | Both crates build on **stable** via `asm!`. `plumb_lines` has a `nightly` feature that uses stdarch intrinsics where they exist (`_mm_clflushopt`) and exports the `with_clflushopt!` entry macro. The bench needs nightly (TMR-style kernels use `std::simd`). |
+| Toolchain | Both crates build on **stable** via `asm!`. `plumb_lines` has a `nightly` feature that uses stdarch intrinsics where they exist (`_mm_clflushopt`) and exports the `with_clflushopt!` entry macro. `plumb_tiles` has one that uses stdarch's AMX intrinsics for every tile instruction (owner decision 2026-10-05: be ready when they stabilize). The bench needs nightly (TMR-style kernels use `std::simd`) and builds both crates' `nightly` paths. |
 | Order | Aligned views (`as_vectors`) first, then NT stores (what Shnatsel wants to see), then CLFLUSHOPT/MOVDIR64B, then AMX tiles, then the TMR pilot. |
 | Cache-line ops | **CLFLUSHOPT and MOVDIR64B only for now**: both are proven useful, one has landed in nightly and one hasn't. CLWB, CLZERO, CLDEMOTE, MOVDIRI and PREFETCHW are deferred: none is faster than existing paths, and none adds coverage TMR needs today. |
 | Line ops vs SIMD levels | Capability tokens (`Clflushopt`, `Movdir64b`), not fearless levels: they're orthogonal to the SIMD ladder (Zen 4 has AVX-512 without MOVDIR64B; Alder Lake the reverse). |

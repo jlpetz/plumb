@@ -376,3 +376,45 @@ noise.
    zmm_512       16.71         31.60         57.70         46.03         57.04       
    spread (max-min)/median: typical 1.9%, worst 4.2% (amx @ 4T); group took 17 s
 ```
+
+## AMX: stdarch intrinsics vs `asm!` (2026-10-05)
+
+plumb_tiles' `nightly` feature (stdarch's AMX intrinsics) against its stable `asm!` path, on
+rustc 1.101 nightly (2026-10-04, LLVM 23.1.3). Both bench binaries were built from the same
+source, one with the bench's `plumb_tiles` dependency set back to no features; four DRAM runs
+of `--only amxread,amxfill,amxcopy,amxstride`, alternating builds. Only four 1 GiB pages were
+free that day (the other threads got 2 MiB pages), so these numbers aren't comparable with the
+tables above; the two builds ran under the same conditions.
+
+Codegen (asm gate, instructions per innermost loop): the intrinsic loops are unrolled
+(`k_amx_read` 66 instructions with 32 tile loads, `asm!` 10 with 4; `k_amx_strided_read` 130
+with 64 loads, `asm!` 9 with 1), and `k_amx_verify_512` is 21 per tile against 29.
+
+DRAM: no measurable difference. The AMX variants of the intrinsic build are at -2.3% to +0.7%
+of the `asm!` build at every thread count; the variants whose code is identical in both builds
+(`zmm_tmr_512`, `nt_tmr_512`, `md_tmr`) moved by up to -4.6%, and one build's two runs differed
+by up to 4.8%.
+
+Cache-resident (probe crate, one thread, one session per sample, ns per 1 KiB tile, median of
+31, three alternating runs agreed within 2%):
+
+| kernel | L1 (16 KiB) `asm!` | L1 intrinsics | L2 (512 KiB) `asm!` | L2 intrinsics |
+|---|---|---|---|---|
+| runtime-stride load, closure captures by reference | 14.8 | 13.7 | 5.46 | 5.99 |
+| runtime-stride load, `move` closure | 14.8 | 14.8 | 5.46 | 5.46 |
+| 4 loads in flight (`k_amx_read`'s shape) | 14.7 | 14.5 | 5.49 | 5.56 |
+| copy, 2 tiles in flight | 6.0 | 5.9 | 10.8 | 10.8 |
+
+The unrolling buys nothing: AMX throughput, not loop overhead, is the limit. The one real
+difference is the by-reference capture on the intrinsic path, about 10% from L2: the session
+function is called, not inlined, and LLVM declares the AMX intrinsics as touching any memory,
+so captured values are reloaded after every tile op (19 instructions per tile vs 10). Either
+calling practice removes it (crate docs, Toolchains). A `move` closure gives 10 instructions,
+5.54 ns from L2. So does the same by-reference closure in a function compiled with `amx-tile`,
+5.56 ns, against 5.54 for `asm!`. By-reference stores showed no time cost: from L2 a tile store
+takes about 17 ns, which hides the extra instructions. An LLVM change that declares the
+intrinsics' real memory effects (the tile state as a target memory location, as AArch64 does
+for SME) takes the plain by-reference loop to 16; it was sent upstream as
+llvm/llvm-project#229025, though plumb doesn't depend on it, since both practices already match
+`asm!`. Loads from an L1-resident buffer being
+~2.7x slower per tile than from L2 holds on both paths; not investigated.

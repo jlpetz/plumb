@@ -8,7 +8,7 @@ advice from fearless_simd's maintainers to try these in extension crates first.
 | Crate | What |
 |---|---|
 | [`plumb_lines`](plumb_lines) | Aligned vector views (`as_vectors`), **scoped non-temporal stores** that `SFENCE` on exit, CLFLUSHOPT (`flush_after`: write, then flush everything written), MOVDIR64B direct stores. |
-| [`plumb_tiles`](plumb_tiles) | Safe x86 tile instructions: Intel AMX now (strided tile load/store from memory, INT8/BF16/FP16 dot products), designed for the x86 ACE extension later. |
+| [`plumb_tiles`](plumb_tiles) | Safe x86 tile instructions: Intel AMX now (strided tile load/store from memory, INT8/BF16/FP16 dot products), designed for the x86 ACE extension later. `asm!` on stable, stdarch's AMX intrinsics with the `nightly` feature. |
 | [`bench`](bench) | The evidence: an asm gate (`asm_check.py`), equivalence tests, and a large-page thread-sweep benchmark comparing these crates with TMR's hand-written per-width kernels. |
 
 Status: experimental, `0.1`, not yet on crates.io. Plan and decisions: [PLAN.md](PLAN.md); tracker:
@@ -45,9 +45,11 @@ Status: experimental, `0.1`, not yet on crates.io. Plan and decisions: [PLAN.md]
 cargo test -p plumb_lines                          # stable
 cargo +nightly test -p plumb_lines --features nightly
 cargo test -p plumb_tiles                          # needs an AMX CPU for the hardware tests
+cargo +nightly test -p plumb_tiles --features nightly
 cargo +nightly test --release -p plumb-bench       # equivalence tests
 cd bench && python asm_check.py --toolchain nightly # the codegen gate (bench, nightly feature)
 python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable
+python asm_check.py --package plumb_tiles --example asm_kernels --toolchain nightly --features nightly
 cargo +nightly run --release -p plumb-bench        # benchmark: idle box, ~25 min, 1 GiB pages
 ```
 
@@ -57,8 +59,8 @@ one plain large-page region per thread (2 GiB by default).
 ## Minimum supported Rust Version (MSRV)
 
 This version of plumb has been verified to compile with **Rust 1.89** and later, the same MSRV
-as fearless_simd 1.0. The `nightly` feature of plumb_lines needs a
-nightly toolchain.
+as fearless_simd 1.0. The `nightly` features of plumb_lines and plumb_tiles need a nightly
+toolchain.
 
 Future versions might increase the Rust version requirement. This will be accompanied by a minor
 version bump.

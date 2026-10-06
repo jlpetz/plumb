@@ -39,6 +39,12 @@ This release has an [MSRV][] of 1.89.
 - Added `Amx::with_tiles`, a per-thread session with all eight tiles configured as 16 rows x 64
   bytes, and `Tiles` with bounds-checked `load`, `load_t1`, `store` and `zero`, plus the AMX dot
   products. Repeated tiles in a dot product are rejected at compile time.
+- Added `with_tiles` on `AmxInt8`, `AmxBf16` and `AmxFp16`: the same session, which with the
+  `nightly` feature also enables that compute set.
+- Added the `nightly` feature: the tile instructions use stdarch's AMX intrinsics
+  (`x86_amx_intrinsics`) instead of `asm!`, with the same API. Each session runs inside a
+  function that enables the AMX features its token proves, so the intrinsics inline into the
+  session closure.
 
 [Unreleased]: https://github.com/jlpetz/plumb/commits/main
 [MSRV]: README.md#minimum-supported-rust-version-msrv

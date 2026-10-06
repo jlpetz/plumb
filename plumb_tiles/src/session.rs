@@ -1,22 +1,16 @@
 // Copyright 2026 the plumb Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The tile session ([`Amx::with_tiles`]) and the operations it unlocks ([`Tiles`]).
-//!
-//! Every tile instruction is an `asm!` block. None of them is `pure`: the tile registers are
-//! invisible to the compiler, so the only thing keeping "load T0, then store T0" in that order
-//! is that the compiler never reorders or drops side-effecting asm blocks. The memory options
-//! then say what each instruction does to memory the compiler can see: loads are `readonly`
-//! (pending stores to the source are completed first), stores (and `STTILECFG`) claim
-//! nothing, and zero/compute/release are `nomem`. No tile instruction touches the stack or
-//! RFLAGS.
+//! The tile session ([`Amx::with_tiles`]) and the operations it unlocks ([`Tiles`]). The
+//! instructions themselves are in `insn`: `asm!` on stable, stdarch's intrinsics with the
+//! `nightly` feature.
 
-use core::arch::asm;
 use core::cell::Cell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 
+use crate::insn;
 use crate::reg::TileReg;
 use crate::{Amx, AmxBf16, AmxFp16, AmxInt8, ROW_BYTES, ROWS, tile_span};
 
@@ -86,15 +80,125 @@ impl Amx {
     #[inline]
     #[track_caller]
     pub fn with_tiles<R>(self, f: impl FnOnce(&mut Tiles<'_>) -> R) -> R {
-        let _session = Session::open(self);
-        // `f` only ever sees `&mut Tiles`, and its result type can't name that borrow, so the
-        // handle cannot outlive `_session`, whose drop releases the tiles.
-        f(&mut Tiles {
-            _session: PhantomData,
-            _per_thread: PhantomData,
-        })
+        #[cfg(not(feature = "nightly"))]
+        return session(self, f);
+        #[cfg(feature = "nightly")]
+        {
+            #[inline]
+            #[track_caller]
+            #[target_feature(enable = "amx-tile")]
+            fn amx_tile<R>(amx: Amx, f: impl FnOnce(&mut Tiles<'_>) -> R) -> R {
+                session(amx, f)
+            }
+            // SAFETY: the Amx token proves AMX-TILE.
+            unsafe { amx_tile(self, f) }
+        }
     }
 }
+
+/// Runs `f` in a session. With the `nightly` feature the callers run this inside a function
+/// that enables the AMX features their token proves, so `f`, inlined here, gets the tile
+/// intrinsics inlined too (see [Toolchains](crate#toolchains)).
+#[inline(always)]
+#[track_caller]
+fn session<R>(amx: Amx, f: impl FnOnce(&mut Tiles<'_>) -> R) -> R {
+    let _session = Session::open(amx);
+    // `f` only ever sees `&mut Tiles`, and its result type can't name that borrow, so the
+    // handle cannot outlive `_session`, whose drop releases the tiles.
+    f(&mut Tiles {
+        _session: PhantomData,
+        _per_thread: PhantomData,
+    })
+}
+
+macro_rules! compute_session {
+    ($($token:ident, $features:literal, $isa:literal, $example:literal;)*) => {$(
+        impl $token {
+            #[doc = concat!("[`Amx::with_tiles`] for code that also uses ", $isa, ".")]
+            ///
+            /// The same session. With the `nightly` feature it also enables this token's
+            /// instructions, so its `TDP*` intrinsics inline inside `f` (with
+            /// [`Amx::with_tiles`] they would be out-of-line calls); on stable the two are
+            /// identical.
+            ///
+            /// # Panics
+            ///
+            /// As [`Amx::with_tiles`].
+            ///
+            /// # Example
+            #[doc = $example]
+            #[inline]
+            #[track_caller]
+            pub fn with_tiles<R>(self, f: impl FnOnce(&mut Tiles<'_>) -> R) -> R {
+                #[cfg(not(feature = "nightly"))]
+                return session(self.amx(), f);
+                #[cfg(feature = "nightly")]
+                {
+                    #[inline]
+                    #[track_caller]
+                    #[target_feature(enable = $features)]
+                    fn compute<R>(t: $token, f: impl FnOnce(&mut Tiles<'_>) -> R) -> R {
+                        session(t.amx(), f)
+                    }
+                    // SAFETY: the token proves AMX-TILE and this instruction set, exactly
+                    // what `compute` enables.
+                    unsafe { compute(self, f) }
+                }
+            }
+        }
+    )*};
+}
+
+compute_session!(
+    AmxInt8, "amx-tile,amx-int8", "AMX-INT8", "
+```
+use plumb_tiles::{AmxInt8, ROW_BYTES, T0, T1, T2, TILE_BYTES};
+
+let Some(int8) = AmxInt8::try_new() else { return };
+let (a, b) = (vec![1_u8; TILE_BYTES], vec![2_u8; TILE_BYTES]);
+let mut c = vec![0_u8; TILE_BYTES];
+int8.with_tiles(|t| {
+    t.load::<T1>(&a, ROW_BYTES);
+    t.load::<T2>(&b, ROW_BYTES);
+    t.dpbssd::<T0, T1, T2>(int8); // T0 starts the session zeroed
+    t.store::<T0>(&mut c, ROW_BYTES);
+});
+// Each i32 of C sums 16 x 4 products of 1 * 2.
+assert!(c.chunks_exact(4).all(|d| i32::from_le_bytes(d.try_into().unwrap()) == 128));
+```";
+    AmxBf16, "amx-tile,amx-bf16", "AMX-BF16", "
+```
+use plumb_tiles::{AmxBf16, ROW_BYTES, T0, T1, T2, TILE_BYTES};
+
+let Some(bf16) = AmxBf16::try_new() else { return };
+let one = [0x80_u8, 0x3F].repeat(TILE_BYTES / 2); // BF16 1.0, little-endian
+let mut c = vec![0_u8; TILE_BYTES];
+bf16.with_tiles(|t| {
+    t.load::<T1>(&one, ROW_BYTES);
+    t.load::<T2>(&one, ROW_BYTES);
+    t.dpbf16ps::<T0, T1, T2>(bf16); // T0 starts the session zeroed
+    t.store::<T0>(&mut c, ROW_BYTES);
+});
+// Each f32 of C sums 16 x 2 products of 1.0 * 1.0.
+assert!(c.chunks_exact(4).all(|d| f32::from_le_bytes(d.try_into().unwrap()) == 32.0));
+```";
+    AmxFp16, "amx-tile,amx-fp16", "AMX-FP16", "
+```
+use plumb_tiles::{AmxFp16, ROW_BYTES, T0, T1, T2, TILE_BYTES};
+
+let Some(fp16) = AmxFp16::try_new() else { return };
+let one = [0x00_u8, 0x3C].repeat(TILE_BYTES / 2); // FP16 1.0, little-endian
+let mut c = vec![0_u8; TILE_BYTES];
+fp16.with_tiles(|t| {
+    t.load::<T1>(&one, ROW_BYTES);
+    t.load::<T2>(&one, ROW_BYTES);
+    t.dpfp16ps::<T0, T1, T2>(fp16); // T0 starts the session zeroed
+    t.store::<T0>(&mut c, ROW_BYTES);
+});
+// Each f32 of C sums 16 x 2 products of 1.0 * 1.0.
+assert!(c.chunks_exact(4).all(|d| f32::from_le_bytes(d.try_into().unwrap()) == 32.0));
+```";
+);
 
 /// Configured tiles. Dropping it releases them.
 struct Session {
@@ -115,10 +219,7 @@ impl Session {
         // SAFETY: the Amx token proves the CPU has AMX-TILE with a palette 1 that accepts this
         // descriptor and that the OS saves tile state for this thread. LDTILECFG reads the 64
         // descriptor bytes and nothing else.
-        unsafe {
-            asm!("ldtilecfg [{cfg}]", cfg = in(reg) CONFIG.0.as_ptr(),
-                 options(nostack, readonly, preserves_flags));
-        }
+        unsafe { insn::ldtilecfg(CONFIG.0.as_ptr()) }
         Self {
             _per_thread: PhantomData,
         }
@@ -132,10 +233,10 @@ fn live_palette(_: Amx) -> u8 {
     let mut live = MaybeUninit::<TileConfig>::uninit();
     // SAFETY: the Amx token proves AMX-TILE and OS-enabled XTILECFG state, so STTILECFG is
     // defined, configured or not; it writes exactly the 64 bytes of `live` (all zero when
-    // unconfigured). The block isn't readonly, so the compiler treats `live` as written.
+    // unconfigured), and neither form of it claims to only read memory, so the compiler
+    // treats `live` as written.
     unsafe {
-        asm!("sttilecfg [{cfg}]", cfg = in(reg) live.as_mut_ptr(),
-             options(nostack, preserves_flags));
+        insn::sttilecfg(live.as_mut_ptr().cast());
         live.as_ptr().cast::<u8>().read()
     }
 }
@@ -143,9 +244,8 @@ fn live_palette(_: Amx) -> u8 {
 impl Drop for Session {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: TILERELEASE is defined whenever AMX-TILE is, configured or not, and touches
-        // no memory.
-        unsafe { asm!("tilerelease", options(nostack, nomem, preserves_flags)) };
+        // SAFETY: a session exists only behind an Amx token, which proves AMX-TILE.
+        unsafe { insn::tilerelease() };
         IN_SESSION.set(false);
     }
 }
@@ -239,45 +339,13 @@ fn out_of_bounds(len: usize, stride: usize) -> ! {
     }
 }
 
-// The raw instructions. Callers have checked the span and hold a session.
-
-#[inline(always)]
-unsafe fn tileloadd<T: TileReg>(src: *const u8, stride: usize) {
-    // SAFETY (caller): src + r*stride .. +ROW_BYTES is readable for r < ROWS; tiles configured.
-    unsafe {
-        asm!("tileloadd tmm{t}, [{src} + {stride}*1]", t = const T::N,
-             src = in(reg) src, stride = in(reg) stride,
-             options(nostack, readonly, preserves_flags));
-    }
-}
-
-#[inline(always)]
-unsafe fn tileloaddt1<T: TileReg>(src: *const u8, stride: usize) {
-    // SAFETY (caller): as tileloadd.
-    unsafe {
-        asm!("tileloaddt1 tmm{t}, [{src} + {stride}*1]", t = const T::N,
-             src = in(reg) src, stride = in(reg) stride,
-             options(nostack, readonly, preserves_flags));
-    }
-}
-
-#[inline(always)]
-unsafe fn tilestored<T: TileReg>(dst: *mut u8, stride: usize) {
-    // SAFETY (caller): dst + r*stride .. +ROW_BYTES is writable for r < ROWS; tiles configured.
-    unsafe {
-        asm!("tilestored [{dst} + {stride}*1], tmm{t}", t = const T::N,
-             dst = in(reg) dst, stride = in(reg) stride,
-             options(nostack, preserves_flags));
-    }
-}
-
 /// The three operands of a TDP instruction must be different tiles (`#UD` otherwise).
 const fn distinct<C: TileReg, A: TileReg, B: TileReg>() -> bool {
     C::N != A::N && C::N != B::N && A::N != B::N
 }
 
 macro_rules! tdp {
-    ($(#[$doc:meta])* $name:ident, $token:ty, $mnemonic:literal) => {
+    ($(#[$doc:meta])* $name:ident, $token:ty, $insn:ident) => {
         $(#[$doc])*
         ///
         /// `C`, `A` and `B` must be three different tiles; naming one twice is a compile error
@@ -286,16 +354,12 @@ macro_rules! tdp {
         pub fn $name<C: TileReg, A: TileReg, B: TileReg>(&mut self, _: $token) {
             const {
                 assert!(distinct::<C, A, B>(),
-                        concat!("plumb_tiles: ", $mnemonic, " needs three different tiles"))
+                        concat!("plumb_tiles: ", stringify!($insn), " needs three different tiles"))
             };
             // SAFETY: the token proves the instruction exists and the session configured the
-            // tiles with shapes the TMUL limits accept (checked by detection); it touches only
-            // tile registers.
-            unsafe {
-                asm!(concat!($mnemonic, " tmm{c}, tmm{a}, tmm{b}"),
-                     c = const C::N, a = const A::N, b = const B::N,
-                     options(nostack, nomem, preserves_flags));
-            }
+            // tiles with shapes the TMUL limits accept (checked by detection); the tiles are
+            // distinct (checked above).
+            unsafe { insn::$insn::<C, A, B>() }
         }
     };
 }
@@ -304,8 +368,8 @@ impl Tiles<'_> {
     /// Sets every byte of tile `T` to zero (`TILEZERO`).
     #[inline(always)]
     pub fn zero<T: TileReg>(&mut self) {
-        // SAFETY: the session configured T; TILEZERO touches no memory.
-        unsafe { asm!("tilezero tmm{t}", t = const T::N, options(nostack, nomem, preserves_flags)) }
+        // SAFETY: the session configured T.
+        unsafe { insn::tilezero::<T>() }
     }
 
     /// Loads tile `T` from `src`: row `r` is `src[r * stride..][..ROW_BYTES]` (`TILELOADD`).
@@ -321,7 +385,7 @@ impl Tiles<'_> {
     pub fn load<T: TileReg>(&mut self, src: &[u8], stride: usize) {
         check_span(src.len(), stride);
         // SAFETY: every row lies inside `src` (checked above); the session configured T.
-        unsafe { tileloadd::<T>(src.as_ptr(), stride) }
+        unsafe { insn::tileloadd::<T>(src.as_ptr(), stride) }
     }
 
     /// [`load`](Self::load) with the T1 hint (`TILELOADDT1`): the data is not expected to be
@@ -336,7 +400,7 @@ impl Tiles<'_> {
     pub fn load_t1<T: TileReg>(&mut self, src: &[u8], stride: usize) {
         check_span(src.len(), stride);
         // SAFETY: as load.
-        unsafe { tileloaddt1::<T>(src.as_ptr(), stride) }
+        unsafe { insn::tileloaddt1::<T>(src.as_ptr(), stride) }
     }
 
     /// Stores tile `T` to `dst`: row `r` goes to `dst[r * stride..][..ROW_BYTES]`
@@ -353,7 +417,7 @@ impl Tiles<'_> {
     pub fn store<T: TileReg>(&mut self, dst: &mut [u8], stride: usize) {
         check_span(dst.len(), stride);
         // SAFETY: every row lies inside `dst` (checked above), which we borrow mutably.
-        unsafe { tilestored::<T>(dst.as_mut_ptr(), stride) }
+        unsafe { insn::tilestored::<T>(dst.as_mut_ptr(), stride) }
     }
 
     /// [`load`](Self::load) from a `u64` buffer. `stride` is still in bytes.
@@ -366,7 +430,7 @@ impl Tiles<'_> {
     pub fn load_u64<T: TileReg>(&mut self, src: &[u64], stride: usize) {
         check_span(size_of_val(src), stride);
         // SAFETY: as load; any bytes of a u64 are readable as u8.
-        unsafe { tileloadd::<T>(src.as_ptr().cast(), stride) }
+        unsafe { insn::tileloadd::<T>(src.as_ptr().cast(), stride) }
     }
 
     /// [`load_t1`](Self::load_t1) from a `u64` buffer. `stride` is still in bytes.
@@ -379,7 +443,7 @@ impl Tiles<'_> {
     pub fn load_t1_u64<T: TileReg>(&mut self, src: &[u64], stride: usize) {
         check_span(size_of_val(src), stride);
         // SAFETY: as load_u64.
-        unsafe { tileloaddt1::<T>(src.as_ptr().cast(), stride) }
+        unsafe { insn::tileloaddt1::<T>(src.as_ptr().cast(), stride) }
     }
 
     /// [`store`](Self::store) to a `u64` buffer. `stride` is still in bytes.
@@ -393,7 +457,7 @@ impl Tiles<'_> {
     pub fn store_u64<T: TileReg>(&mut self, dst: &mut [u64], stride: usize) {
         check_span(size_of_val(dst), stride);
         // SAFETY: as store; every bit pattern is a valid u64.
-        unsafe { tilestored::<T>(dst.as_mut_ptr().cast(), stride) }
+        unsafe { insn::tilestored::<T>(dst.as_mut_ptr().cast(), stride) }
     }
 
     tdp!(
@@ -402,25 +466,25 @@ impl Tiles<'_> {
         /// With each tile read as 16 rows of 16 dwords:
         /// `C[m][n] += sum(k < 16, i < 4) A[m][k].i8[i] * B[k][n].i8[i]`, wrapping at 32 bits.
         /// See [Compute](crate#compute) for the matrix (VNNI) layout.
-        dpbssd, AmxInt8, "tdpbssd"
+        dpbssd, AmxInt8, tdpbssd
     );
     tdp!(
         /// `C += A * B` with signed bytes in `A` and unsigned bytes in `B` (`TDPBSUD`).
         ///
         /// `C[m][n] += sum(k < 16, i < 4) A[m][k].i8[i] * B[k][n].u8[i]`, wrapping at 32 bits.
-        dpbsud, AmxInt8, "tdpbsud"
+        dpbsud, AmxInt8, tdpbsud
     );
     tdp!(
         /// `C += A * B` with unsigned bytes in `A` and signed bytes in `B` (`TDPBUSD`).
         ///
         /// `C[m][n] += sum(k < 16, i < 4) A[m][k].u8[i] * B[k][n].i8[i]`, wrapping at 32 bits.
-        dpbusd, AmxInt8, "tdpbusd"
+        dpbusd, AmxInt8, tdpbusd
     );
     tdp!(
         /// `C += A * B` on unsigned x unsigned bytes (`TDPBUUD`).
         ///
         /// `C[m][n] += sum(k < 16, i < 4) A[m][k].u8[i] * B[k][n].u8[i]`, wrapping at 32 bits.
-        dpbuud, AmxInt8, "tdpbuud"
+        dpbuud, AmxInt8, tdpbuud
     );
     tdp!(
         /// `C += A * B` on BF16 pairs, FP32 accumulate (`TDPBF16PS`).
@@ -428,7 +492,7 @@ impl Tiles<'_> {
         /// `C[m][n] += sum(k < 16, i < 2) A[m][k].bf16[i] * B[k][n].bf16[i]`, `C` as 16 x 16
         /// f32. MXCSR is ignored: rounding is to nearest even, denormal inputs count as zero
         /// and denormal results are flushed to zero.
-        dpbf16ps, AmxBf16, "tdpbf16ps"
+        dpbf16ps, AmxBf16, tdpbf16ps
     );
     tdp!(
         /// `C += A * B` on FP16 pairs, FP32 accumulate (`TDPFP16PS`).
@@ -436,7 +500,7 @@ impl Tiles<'_> {
         /// `C[m][n] += sum(k < 16, i < 2) A[m][k].f16[i] * B[k][n].f16[i]`, `C` as 16 x 16
         /// f32. MXCSR is ignored. Unlike [`dpbf16ps`](Self::dpbf16ps), FP16 denormal inputs
         /// are kept (FP16's range is small enough that their products are normal in f32).
-        dpfp16ps, AmxFp16, "tdpfp16ps"
+        dpfp16ps, AmxFp16, tdpfp16ps
     );
 }
 
