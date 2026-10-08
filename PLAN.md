@@ -3,7 +3,7 @@
 Extension crates for [fearless_simd](https://crates.io/crates/fearless_simd) that add what a
 memory tester needs and a portable SIMD library doesn't have. They started from TMR-APP's
 TODO 84 (can fearless_simd replace TMR's per-width SIMD macros?) and from Shnatsel's reply on
-the Linebender Zulip: non-temporal stores and tiles should be experimented with in our own
+the Linebender Zulip: non-temporal stores and tiles should be experimented with in my own
 extension crates first, and NT may be upstreamed once the design has settled. Tiles must avoid
 the `fearless_` prefix.
 
