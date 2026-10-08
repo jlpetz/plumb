@@ -6,7 +6,7 @@
 //! call there, and that the session's STTILECFG/LDTILECFG/TILERELEASE wrap it.
 //!
 //! ```text
-//! cd bench && python asm_check.py --package plumb_tiles --example asm_kernels
+//! cd bench && python asm_check.py --package plumb_tiles --example tile_kernels
 //! ```
 //!
 //! `main` runs each kernel once on small buffers and checks the results: memory kernels byte

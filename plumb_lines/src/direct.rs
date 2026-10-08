@@ -32,8 +32,10 @@
 //! plumb_lines::direct(md, &mut dst, |w| need_send(w));
 //! ```
 //!
-//! stdarch has no MOVDIR64B intrinsic and rustc has no `movdir64b` target feature yet, so this is
-//! `asm!` on every toolchain; `asm!` needs neither and inlines anywhere.
+//! This is `asm!` on every toolchain; `asm!` needs no target feature and inlines anywhere.
+//! rustc's `movdir64b` target feature is on nightly (rust-lang/rust#163742), and stdarch's
+//! `_movdir64b` is in review (rust-lang/stdarch#2239); once that reaches nightly the `nightly`
+//! feature can use it.
 
 use core::marker::PhantomData;
 use core::slice;

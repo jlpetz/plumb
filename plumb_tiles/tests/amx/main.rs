@@ -16,18 +16,18 @@ mod memory;
 mod session;
 
 /// The asm_check kernels, run here so their results are checked on every `cargo test`.
-#[path = "../../examples/asm_kernels.rs"]
-mod asm_kernels;
+#[path = "../../examples/tile_kernels.rs"]
+mod tile_kernels;
 
 #[test]
 fn asm_check_kernels_compute_the_right_results() {
-    asm_kernels::main();
+    tile_kernels::main();
 }
 
 /// The kernels refuse partial buffers instead of skipping the tail.
 #[test]
 fn asm_check_kernels_reject_partial_buffers() {
-    use asm_kernels::kernels::{
+    use tile_kernels::kernels::{
         BLOCK_WORDS, TILE_WORDS, k_tile_copy, k_tile_fill, k_tile_stride_fill, k_tile_stride_load,
         k_tile_stride_load_t1,
     };

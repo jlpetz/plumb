@@ -19,8 +19,8 @@ Usage:
   python asm_check.py --no-build    # reuse the last .s
   python asm_check.py --dump k_verify4_fs_512   # print that kernel's loops (and callees)
   python asm_check.py --density     # also print instructions per key memory op (twin metric)
-  python asm_check.py --package plumb_tiles --example asm_kernels   # check a crate's example
-  python asm_check.py --package plumb_tiles --example asm_kernels --toolchain nightly --features nightly
+  python asm_check.py --package plumb_tiles --example tile_kernels   # check a crate's example
+  python asm_check.py --package plumb_tiles --example tile_kernels --toolchain nightly --features nightly
   python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable
 Extra expectations and special instructions are loaded from expect/*.json (one file per
 module), so modules can be added without editing this script:

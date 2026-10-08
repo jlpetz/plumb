@@ -131,7 +131,9 @@
 //! ## Calling practices (nightly)
 //!
 //! From a caller compiled without those features the session function is called, not inlined,
-//! and LLVM assumes every AMX intrinsic may write any memory it can reach. A value the closure
+//! and LLVM assumes every AMX intrinsic may write any memory it can reach
+//! (llvm/llvm-project#229025 proposes declaring what each one really touches, which removes some
+//! of the reloads below but not all, so the practices stay). A value the closure
 //! captured by reference then lives in memory and is reloaded after every tile instruction: a
 //! loop of tile loads with a runtime stride and step goes from 10 to 19 instructions per tile
 //! and runs about 10% slower from L2 (the workspace's `bench/RESULTS.md`). Either of two

@@ -43,7 +43,8 @@
 //! range flush to stdarch's `_mm_clflushopt` (rust-lang/rust#157096) so LLVM can unroll it, and
 //! exports `with_clflushopt!` (module `entry`), which builds a fearless kernel entry point whose target
 //! features are the level's plus `clflushopt`, so the intrinsic also inlines inside fearless
-//! loops. MOVDIR64B has no intrinsic in stdarch yet, so it is always `asm!`.
+//! loops. MOVDIR64B is always `asm!` for now: rustc's `movdir64b` target feature is on nightly
+//! (rust-lang/rust#163742), and stdarch's `_movdir64b` is in review (rust-lang/stdarch#2239).
 //!
 //! [fearless_simd]: https://crates.io/crates/fearless_simd
 

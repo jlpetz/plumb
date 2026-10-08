@@ -39,6 +39,21 @@ Status: experimental, `0.1`, not yet on crates.io. Plan and decisions: [PLAN.md]
   any level), CLFLUSHOPT inlined inside fearless loops (via a capability-token entry macro on
   nightly, or `asm!` on stable), MOVDIR64B, and AMX tiles.
 
+## Upstream
+
+Changes sent upstream so that less of this needs `asm!` (status 2026-10-08):
+
+- CLFLUSHOPT: the target feature (rust-lang/rust#157098) and `_mm_clflushopt`
+  (rust-lang/stdarch#2141) are on nightly, tracked in rust-lang/rust#157096.
+- MOVDIR64B and MOVDIRI: the target features and runtime detection merged
+  (rust-lang/rust#163742); `_movdir64b` and `_directstoreu_u32/u64` are in review
+  (rust-lang/stdarch#2239).
+- Non-temporal stores: llvm/llvm-project#229240 (by jyknight) makes `!nontemporal` stores safe on
+  x86, which would let Rust's `std::arch` drop its `asm!` for `_mm_stream_*`. It was tested
+  against plumb's fill loops, with fixes offered. An opaque-intrinsic alternative
+  (llvm/llvm-project#228875) was closed in its favour.
+- AMX: declaring the intrinsics' real memory effects (llvm/llvm-project#229025, in review).
+
 ## Running
 
 ```bash
@@ -49,7 +64,7 @@ cargo +nightly test -p plumb_tiles --features nightly
 cargo +nightly test --release -p plumb-bench       # equivalence tests
 cd bench && python asm_check.py --toolchain nightly # the codegen gate (bench, nightly feature)
 python asm_check.py --package plumb_lines --example asm_kernels --toolchain stable
-python asm_check.py --package plumb_tiles --example asm_kernels --toolchain nightly --features nightly
+python asm_check.py --package plumb_tiles --example tile_kernels --toolchain nightly --features nightly
 cargo +nightly run --release -p plumb-bench        # benchmark: idle box, ~25 min, 1 GiB pages
 ```
 

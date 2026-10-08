@@ -98,7 +98,11 @@
 //! block, with the offsets as displacements. stdarch's stream intrinsics are `asm!` too (on
 //! purpose: rust-lang/rust#114582), so LLVM won't unroll a loop around them, and each one takes
 //! its address in a register, which costs a `lea` per store when called four times. TMR's
-//! `simple_write_nt_positional_simd!` unrolls by hand and pays the `lea`s. A cache line written only partly before its write-combining buffer drains takes a slow
+//! `simple_write_nt_positional_simd!` unrolls by hand and pays the `lea`s.
+//! llvm/llvm-project#229240 would make LLVM's `!nontemporal` stores safe on x86 (the backend
+//! fences them), which would let `std::arch` drop the `asm!` and LLVM unroll these loops itself.
+//!
+//! A cache line written only partly before its write-combining buffer drains takes a slow
 //! path on current Intel parts. Sequential fills that write whole lines with adjacent narrower
 //! stores (4 x 128-bit or 2 x 256-bit) are fine; in TMR's multi-threaded runs 128-bit was the
 //! fastest sequential NT width. The slow case is isolated or scattered partial-line stores.

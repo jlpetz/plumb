@@ -8,8 +8,9 @@ status, decisions, next step. Background is in [PLAN.md](PLAN.md).
 **Status**: Published 2026-10-05 at https://github.com/jlpetz/plumb. Both crates built,
 adversarially reviewed and fixed, and restyled to fearless_simd's (Linebender) conventions; tests
 and clippy clean on stable, nightly and MSRV 1.89; asm gate 130/130 (bench), 8/8 (plumb_lines
-example, stable and nightly), 10/10 (plumb_tiles example). Timing done (item 2).
-**Next**: watch the first CI runs on GitHub.
+example, stable and nightly), 10/10 (plumb_tiles example). Timing done (item 2). First CI
+runs green (e19c848, 2026-10-05).
+**Next**: none.
 
 ### 2. Timing runs on an idle box
 **Status**: Done 2026-10-03 (full sweep 825c9a9, verify groups re-run at 4254f13):
@@ -43,10 +44,13 @@ ergonomics, not speed. #163742 merged 2026-10-04; #2239 waits for stdarch's rust
 prefers fixing `!nontemporal` itself, and jyknight's llvm/llvm-project#229240 does that (an x86
 pass inserts SFENCE, keeping `!nontemporal` a hint). Tested and reviewed 2026-10-06: plumb's
 fill loops keep MOVNT, unroll and get one SFENCE at the exit; posted a funclet-EH bug and the
-cost of per-iteration fences. Plan: close #228875 once #229240 lands, unless reviewers want both.
-**Next**: re-run #2239's CI once #2240 merges; when #229240 lands, take the Rust side to Rust
-(rustc's `nontemporal_store` and stdarch's `_mm_stream_*` back to `!nontemporal` on x86); then
-use `_movdir64b` behind `nightly` in `plumb_lines::direct`.
+cost of per-iteration fences. #228875 closed 2026-10-08 in favour of #229240 (jyknight and
+RalfJung prefer it); offered #229240 five fix commits (branch `nt-fence-fixes` on
+jlpetz/llvm-project). A patch giving six x86 intrinsics `nosync` is ready locally, held until
+asked. #2239's CI is green since #2240 merged; waits for review.
+**Next**: when #229240 lands, take the Rust side to Rust (rustc's `nontemporal_store` and
+stdarch's `_mm_stream_*` back to `!nontemporal` on x86); when `_movdir64b` reaches nightly, use
+it behind `nightly` in `plumb_lines::direct`.
 
 ### 6. plumb_tiles: AMX
 **Status**: Built, reviewed (16 confirmed findings, all fixed) and wired into the bench
