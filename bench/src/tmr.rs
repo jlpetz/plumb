@@ -315,6 +315,35 @@ tmr_wflush!(
     "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2,clflushopt"
 );
 
+/// TMR's whole mirror at 512 bits (`mirror_swap_whole!` in `mirror_move_v2_impl!`, TMR-APP
+/// tests.rs) per `MIRROR_CHUNK_U64` chunk: the two ends walk the chunk one vector per step and
+/// cross the middle, so every pair is swapped twice: one round trip.
+///
+/// # Safety
+/// `p..p+n` valid and 64-byte aligned, `n` a multiple of 8; AVX-512F present.
+#[unsafe(no_mangle)]
+#[inline(never)]
+#[target_feature(enable = "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2")]
+pub unsafe fn k_mirror_tmr_512(p: *mut u64, n: usize) {
+    type V = std::simd::u64x8;
+    const W: usize = 8;
+    let mut start = 0;
+    while start < n {
+        let end = (start + MIRROR_CHUNK_U64).min(n);
+        let mut lo = start;
+        let mut hi = end - W;
+        for _ in 0..(end - start) / W {
+            let x = *(p.add(lo) as *const V);
+            let y = *(p.add(hi) as *const V);
+            *(p.add(lo) as *mut V) = y;
+            *(p.add(hi) as *mut V) = x;
+            lo += W;
+            hi = hi.wrapping_sub(W);
+        }
+        start = end;
+    }
+}
+
 /// DRAM -> DRAM line copy: 512-bit load + NT store, then sfence (an earlier TMR probe's NT-512 path).
 #[unsafe(no_mangle)]
 #[inline(never)]

@@ -21,8 +21,9 @@ noise.
 ## Summary
 
 - **DRAM: every plumb kernel is at parity with its TMR twin** (98-105% at every thread count),
-  including the ported StuckBit, Refresh and SimpleNT tests; the one exception is Refresh at 256
-  bits, where plumb is faster (below).
+  including the ported StuckBit, Refresh and SimpleNT tests. Refresh at 256 bits looked 10-17%
+  faster with plumb on 2026-10-03; that moves between identical copies of the TMR-style code
+  (2026-10-21 section).
 - **L2: at parity or faster**, after one fix: the 512-bit view verify was 84% of TMR's. The cause
   is LLVM unrolling the `as_chunks` OR-accumulate loop and reassociating it, which replaces the
   fused `vpternlogq acc, p, [mem]` (one uop per load) with `vpxorq` + `vpternlogq`. It was not
@@ -36,15 +37,16 @@ noise.
 - **The lost unroll was not a performance issue.** The StuckBit port with the fill's old shape
   (one zmm store per iteration, `plplain_512`) runs at 97-101% of TMR's in DRAM (the unrolled
   `pl_512`: 99-101%) and 101.4% in L2.
-- **Refresh at 256 bits: plumb 110-117% of the TMR-style port** (three runs). The TMR-style
-  port's 256-bit verify loop carries an extra induction variable (14 instructions per 4 loads, 10
-  at 512); not yet shown to be the cause, and the loop is this bench's port of TMR's macro, so
-  check TMR-APP's own loop before reading this as "plumb beats TMR".
+- **Refresh at 256 bits: no real gap.** The 110-117% of 2026-10-03 moves between copies of
+  identical code. On 2026-10-21 `tmr_256` was at parity with plumb while its identical control
+  ran at 86%, so it's code placement or run order, not TMR's loop shape, which TMR-APP's own
+  Refresh shares.
 - **AMX: no bandwidth advantage.** Tile loads read at 95-100% of the zmm verify's rate, tile
   stores fill at 98-99% of zmm stores, the stride-4096 tile load matches 16 zmm loads (98-100%),
   and a tile copy is 62-67% of NT-512 (tile stores are ordinary stores, so they pay the
-  read-for-ownership that NT and MOVDIR64B avoid). AMX stays a power/heat
-  load and an alternative access path, not a faster one.
+  read-for-ownership that NT and MOVDIR64B avoid). A tile MirrorMove (the high end at stride
+  -64) runs at 86-89% of TMR's zmm swap in DRAM and 97% from L2. AMX stays a power/heat load
+  and an alternative access path, not a faster one.
 
 ## L2 regime
 
@@ -418,3 +420,76 @@ for SME) takes the plain by-reference loop to 16; it was sent upstream as
 llvm/llvm-project#229025, though plumb doesn't depend on it, since both practices already match
 `asm!`. Loads from an L1-resident buffer being
 ~2.7x slower per tile than from L2 holds on both paths; not investigated.
+
+## Refresh at 256 bits, AMX MirrorMove, CLFLUSHOPT (2026-10-21)
+
+Same box, rustc 1.101 nightly (2026-10-15). The box was idle (CPU 3-5%, no builds or tests
+running). Three DRAM passes of `--only refreshx,refreshnf,amxmirror` and three L2 passes of
+`--only amxmirror`. Pass 3 had the lowest spread (typical 1.6-3.1%), so its tables are below;
+the ratios held in all three passes.
+
+**Refresh at 256 bits (TODO 11): not TMR's loop shape.** The 2026-10-03 gap (plumb 110-117%)
+is gone in this build: `tmr_256` and `pl_256` are at parity (99-101% in every pass). But
+`tmrx_256` runs at 86-87% of `tmr_256` at one thread, reproducing the old gap. `tmrx_256` is
+the control: `refresh_tmr_256` rebuilt through the variants' function, with the same loops.
+Disassembled from the measured binary, the two verify loops are instruction for instruction the
+same (base register `rax` against `rbp`) and sit at the same offset in their 64-byte blocks; the
+fill and flush loops match too. The variants:
+
+- plumb's verify (`tmrvpl`), or plumb's fill and flush (`tmrfpl`): back to full speed.
+- the precomputed bound (`tmrbnd`, 12 instructions per 4 loads): no change.
+- eight loads per iteration (`tmrx2`): recovers about half.
+
+So the ~14% moves between copies of the same code. It's code placement or run order (samples
+run round-robin, so each variant always follows the same neighbour), not something a source
+change in TMR would fix, and not a plumb advantage. Without the flush (TMR's default Refresh)
+the two styles are at parity at both widths.
+
+```text
+== refreshx | TMR Refresh port at 256 bits, one phase swapped (TODO 11)
+   variant                 1T            2T            4T            6T            8T
+   tmr_256        9.10         17.30         32.39         30.44         38.79
+   tmrx_256       7.85         14.96         27.84         28.00         36.07
+   tmrbnd_256     7.82         14.83         27.09         26.30         35.41
+   tmrx2_256      8.51         16.20         30.28         28.57         36.29
+   tmrvpl_256     9.10         17.28         32.59         30.49         39.01
+   tmrfpl_256     9.15         17.53         32.99         30.71         39.35
+   pl_256         9.17 (101%)  17.45 (101%)  32.77 (101%)  30.60 (101%)  39.08 (101%)
+== refreshnf | TMR Refresh port, no flush (TMR's default; sleep omitted)
+   variant                 1T            2T            4T            6T            8T
+   tmr_256       17.39         32.83         59.92         55.82         69.60
+   pl_256        18.09 (104%)  34.23 (104%)  62.58 (104%)  56.35 (101%)  70.02 (101%)
+   tmr_512       20.17         38.00         68.65         55.38         67.96
+   pl_512        20.63 (102%)  39.01 (103%)  69.72 (102%)  55.29 (100%)  68.41 (101%)
+```
+
+**AMX MirrorMove: slower than zmm.** `k_amx_mirror` does TMR's whole mirror through tiles: two
+tiles from each end per `asm!` block, the high end at stride -64, 13 instructions per 32 line
+pairs against about 160 for TMR's swap. It runs at 86-89% of TMR's zmm swap in DRAM and 97%
+from L2 (131 against 135 GiB/s, counting TMR's 2 reads + 2 writes per byte). The fewer
+instructions buy nothing. Like the other tile paths, it's a different execution unit, not a
+faster one.
+
+```text
+== amxmirror | MirrorMove round trip, 4 MiB chunks (GiB/s of 2R+2W per byte)
+   variant                 1T            2T            4T            6T            8T
+   amx           33.16         62.22        106.07         77.48         93.53
+   zmm_tmr_512   38.00         70.06        118.77         90.22        108.21
+   L2, one thread, 256 KiB: amx 130.9-131.4, zmm_tmr_512 135.0-135.2 (three passes)
+```
+
+**CLFLUSHOPT, for the stabilization report** (`TMR/clflushopt-proof-test`, outside this repo):
+one thread on CPU 2 follows a random pointer chain through a buffer; median of 31 rounds, the
+range over three runs.
+
+| buffer | before the chase | ns per load |
+|---|---|---|
+| 32 KiB | nothing (L1) | 1.6 |
+| 32 KiB | `_mm_clflushopt` every line + `_mm_mfence` | 138.9-140.7 |
+| 1 MiB | nothing (L2) | 5.5-5.6 |
+| 1 MiB | `_mm_clflushopt` every line + `_mm_mfence` | 141.2-141.8 |
+| 1 MiB | `_mm_clflush` every line + `_mm_mfence` | 140.6-141.7 |
+| 32 MiB | nothing (L3 reference) | 47.5-51.5 |
+
+Flushing 1 MiB of dirty lines takes 5.71-5.78 ns per line with CLFLUSHOPT and 186.8-187.4 ns
+with CLFLUSH: 33 times faster.

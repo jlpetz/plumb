@@ -24,8 +24,9 @@ Status: experimental, `0.1`, not yet on crates.io. Plan and decisions: [PLAN.md]
   NT stores per `asm!` block). The one looser kernel is a per-line `asm!` flush in a user loop,
   which costs a `lea` per line (documented). Table: [bench/CODEGEN.md](bench/CODEGEN.md).
 - **Throughput parity** ([bench/RESULTS.md](bench/RESULTS.md); 1 GiB pages, 1/2/4/6/8 threads):
-  every plumb kernel is at 97-105% of its TMR twin in DRAM (Refresh at 256 bits is 110-117%,
-  not yet explained: TODO 11), and at parity or faster from L2. One
+  every plumb kernel is at 97-105% of its TMR twin in DRAM (an earlier 110-117% for Refresh at
+  256 bits turned out to move between identical copies of the code), and at parity or faster
+  from L2. One
   loop-shape rule came out of it: at 512 bits, walk an OR-accumulate verify one group of four
   vectors per iteration. LLVM unrolls an `as_chunks` loop there and loses the fused
   `vpternlogq`, which cost 16% from L2 (the TODO 84 runs blamed indexed addressing; it wasn't).

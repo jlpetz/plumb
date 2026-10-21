@@ -406,6 +406,34 @@ fn ported_tests_agree_and_catch_faults() {
         refresh_tmr_256,
         simplent_tmr_256
     );
+    // TODO 11's Refresh variants, each against refresh_pl.
+    let t2 = t.t2;
+    macro_rules! tmrx {
+        ($fill_pl:literal, $verify:ident) => {
+            check_port(
+                &format!("refresh_tmrx_256::<{}, {}>", $fill_pl, stringify!($verify)),
+                n,
+                1,
+                1,
+                &refresh,
+                &|b, f| unsafe {
+                    tmrport::refresh_tmrx_256::<$fill_pl, { tmrport::$verify }, _>(
+                        t2,
+                        cf,
+                        b.as_mut_ptr(),
+                        b.len(),
+                        f,
+                    )
+                },
+                &|b, f| tmrport::refresh_pl::<Avx2, u64x4<Avx2>, _>(t2, cf, b, true, f),
+            );
+        };
+    }
+    tmrx!(false, VERIFY_TMR);
+    tmrx!(false, VERIFY_BOUND);
+    tmrx!(false, VERIFY_X2);
+    tmrx!(false, VERIFY_PL);
+    tmrx!(true, VERIFY_TMR);
     if let (Some(t5), true) = (t.t5, t.tmr512) {
         both!(
             "512",
@@ -455,6 +483,41 @@ fn port_entries_are_wired_right() {
             Box::new(|b| tmrport::k_refresh_pl_256(t.t2, t.cf, b)),
             REFRESH_PATTERN,
         ),
+        (
+            "k_refreshnf_tmr_256",
+            Box::new(tmrport::k_refreshnf_tmr_256),
+            REFRESH_PATTERN,
+        ),
+        (
+            "k_refreshnf_pl_256",
+            Box::new(|b| tmrport::k_refreshnf_pl_256(t.t2, t.cf, b)),
+            REFRESH_PATTERN,
+        ),
+        (
+            "k_refresh_tmrx_256",
+            Box::new(|b| tmrport::k_refresh_tmrx_256(t.t2, t.cf, b)),
+            REFRESH_PATTERN,
+        ),
+        (
+            "k_refresh_tmrbnd_256",
+            Box::new(|b| tmrport::k_refresh_tmrbnd_256(t.t2, t.cf, b)),
+            REFRESH_PATTERN,
+        ),
+        (
+            "k_refresh_tmrx2_256",
+            Box::new(|b| tmrport::k_refresh_tmrx2_256(t.t2, t.cf, b)),
+            REFRESH_PATTERN,
+        ),
+        (
+            "k_refresh_tmrvpl_256",
+            Box::new(|b| tmrport::k_refresh_tmrvpl_256(t.t2, t.cf, b)),
+            REFRESH_PATTERN,
+        ),
+        (
+            "k_refresh_tmrfpl_256",
+            Box::new(|b| tmrport::k_refresh_tmrfpl_256(t.t2, t.cf, b)),
+            REFRESH_PATTERN,
+        ),
     ];
     if let (Some(t5), true) = (t.t5, t.tmr512) {
         cases.push(("k_sb_tmr_512", Box::new(tmrport::k_sb_tmr_512), STUCKBIT_P1));
@@ -491,6 +554,16 @@ fn port_entries_are_wired_right() {
         cases.push((
             "k_refresh_pl_512",
             Box::new(move |b| tmrport::k_refresh_pl_512(t5, t.cf, b)),
+            REFRESH_PATTERN,
+        ));
+        cases.push((
+            "k_refreshnf_tmr_512",
+            Box::new(tmrport::k_refreshnf_tmr_512),
+            REFRESH_PATTERN,
+        ));
+        cases.push((
+            "k_refreshnf_pl_512",
+            Box::new(move |b| tmrport::k_refreshnf_pl_512(t5, t.cf, b)),
             REFRESH_PATTERN,
         ));
     }

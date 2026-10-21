@@ -18,6 +18,8 @@ pub const LCG_ADD: u64 = 1_442_695_040_888_963_407;
 pub const LCG_SEED: u64 = 0x1234_5678_9ABC_DEF0;
 /// Cache line. TMR reads it from `CacheInfo`; every x86 part TMR supports uses 64.
 pub const LINE: usize = 64;
+/// TMR's MirrorV2 chunk in u64: 4 MiB (TMR-APP `runner.rs`).
+pub const MIRROR_CHUNK_U64: usize = (4 << 20) / 8;
 /// Prefetch distance for the prefetch-verify kernels, in bytes (8 lines ahead).
 pub const PF_DIST: usize = 8 * LINE;
 

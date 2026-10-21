@@ -387,6 +387,116 @@ pub fn simplent_pl<S: Simd, V: SimdInt<S, Element = u64> + NtStore<S>, F: FnMut(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Refresh at 256 bits, one phase swapped at a time (TODO 11)
+// ---------------------------------------------------------------------------------------------
+
+/// `refresh_tmrx_256`'s verify loops. `VERIFY_TMR` is `refresh_tmr_256`'s own.
+pub const VERIFY_TMR: u8 = 0;
+/// TMR's loop with the four-vector bound computed once (the cheap fix for TMR).
+pub const VERIFY_BOUND: u8 = 1;
+/// TMR's four accumulators, two groups of four vectors per iteration.
+pub const VERIFY_X2: u8 = 2;
+/// plumb's `verify4_view`.
+pub const VERIFY_PL: u8 = 3;
+
+/// `refresh_tmr_256` (flush on) with one phase swapped, to find what costs it against
+/// `refresh_pl_256` at DRAM (TODO 11). `FILL_PL` fills and flushes as `refresh_pl` does
+/// (`flush_after` around `fill_view`); `VERIFY` picks the verify loop. TMR's verify loop isn't
+/// slow on its own: the standalone `k_verify4_tmr_256` has the same loop and keeps up.
+///
+/// # Safety
+/// As `refresh_tmr_256`.
+#[inline(never)]
+#[target_feature(enable = "avx2,avx,fma,bmi1,bmi2")]
+pub unsafe fn refresh_tmrx_256<const FILL_PL: bool, const VERIFY: u8, F: FnMut(&mut [u64])>(
+    t2: Avx2,
+    cf: Clflushopt,
+    p: *mut u64,
+    n: usize,
+    mut inject: F,
+) -> u64 {
+    type V = std::simd::u64x4;
+    let lanes = 4;
+    let base = p as *mut V;
+    let len = n / lanes;
+    let chunk = (CHUNK_U64 / lanes).max(256);
+    let pattern = V::splat(REFRESH_PATTERN);
+    let mut errs = 0u64;
+    let mut start = 0;
+    while start < len {
+        let end = (start + chunk).min(len);
+        let words = (end - start) * lanes;
+        if FILL_PL {
+            let c = std::slice::from_raw_parts_mut(base.add(start) as *mut u64, words);
+            plumb_lines::flush_after(cf, c, |c| {
+                fill_view::<Avx2, u64x4<Avx2>>(t2, c, REFRESH_PATTERN)
+            });
+        } else {
+            for i in start..end {
+                *base.add(i) = pattern;
+            }
+            crate::tmr::k_flush_tmr(base.add(start) as *const u64, words);
+        }
+        fence(Ordering::SeqCst);
+        inject(std::slice::from_raw_parts_mut(
+            base.add(start) as *mut u64,
+            words,
+        ));
+        let bad = if VERIFY == VERIFY_PL {
+            let c = std::slice::from_raw_parts(base.add(start) as *const u64, words);
+            verify4_view::<Avx2, u64x4<Avx2>>(t2, c, REFRESH_PATTERN) != 0
+        } else {
+            let mut a0 = V::splat(0);
+            let mut a1 = V::splat(0);
+            let mut a2 = V::splat(0);
+            let mut a3 = V::splat(0);
+            let mut i = start;
+            macro_rules! four {
+                ($o:expr) => {
+                    a0 |= *base.add(i + $o) ^ pattern;
+                    a1 |= *base.add(i + $o + 1) ^ pattern;
+                    a2 |= *base.add(i + $o + 2) ^ pattern;
+                    a3 |= *base.add(i + $o + 3) ^ pattern;
+                };
+            }
+            match VERIFY {
+                VERIFY_TMR => {
+                    while i + 4 <= end {
+                        four!(0);
+                        i += 4;
+                    }
+                }
+                VERIFY_BOUND => {
+                    let end4 = start + (end - start) / 4 * 4;
+                    while i < end4 {
+                        four!(0);
+                        i += 4;
+                    }
+                }
+                _ => {
+                    let end8 = start + (end - start) / 8 * 8;
+                    while i < end8 {
+                        four!(0);
+                        four!(4);
+                        i += 8;
+                    }
+                }
+            }
+            while i < end {
+                a0 |= *base.add(i) ^ pattern;
+                i += 1;
+            }
+            ((a0 | a1) | (a2 | a3)).simd_ne(V::splat(0)).any()
+        };
+        if bad {
+            errs += 1;
+        }
+        start = end;
+    }
+    errs
+}
+
+// ---------------------------------------------------------------------------------------------
 // Named bench entries (no-op injection)
 // ---------------------------------------------------------------------------------------------
 
@@ -417,6 +527,8 @@ tmr_entry!(k_sbnf_tmr_256, sb_tmr_256, flush false);
 tmr_entry!(k_sbnf_tmr_512, sb_tmr_512, flush false);
 tmr_entry!(k_refresh_tmr_256, refresh_tmr_256, flush true);
 tmr_entry!(k_refresh_tmr_512, refresh_tmr_512, flush true);
+tmr_entry!(k_refreshnf_tmr_256, refresh_tmr_256, flush false);
+tmr_entry!(k_refreshnf_tmr_512, refresh_tmr_512, flush false);
 tmr_entry!(k_simplent_tmr_256, simplent_tmr_256);
 tmr_entry!(k_simplent_tmr_512, simplent_tmr_512);
 
@@ -445,5 +557,26 @@ pl_entry!(k_sb_plplain_512, Avx512, u64x8, stuckbit_pl_plainfill, flush true);
 pl_entry!(k_sbnf_plplain_512, Avx512, u64x8, stuckbit_pl_plainfill, flush false);
 pl_entry!(k_refresh_pl_256, Avx2, u64x4, refresh_pl, flush true);
 pl_entry!(k_refresh_pl_512, Avx512, u64x8, refresh_pl, flush true);
+pl_entry!(k_refreshnf_pl_256, Avx2, u64x4, refresh_pl, flush false);
+pl_entry!(k_refreshnf_pl_512, Avx512, u64x8, refresh_pl, flush false);
+
+macro_rules! tmrx_entry {
+    ($name:ident, $fill_pl:literal, $verify:ident) => {
+        #[unsafe(no_mangle)]
+        #[inline(never)]
+        pub fn $name(t2: Avx2, cf: Clflushopt, buf: &mut [u64]) -> u64 {
+            // SAFETY: page-aligned whole buffer; the tokens prove the CPU features.
+            unsafe {
+                refresh_tmrx_256::<$fill_pl, $verify, _>(t2, cf, buf.as_mut_ptr(), buf.len(), none)
+            }
+        }
+    };
+}
+
+tmrx_entry!(k_refresh_tmrx_256, false, VERIFY_TMR);
+tmrx_entry!(k_refresh_tmrbnd_256, false, VERIFY_BOUND);
+tmrx_entry!(k_refresh_tmrx2_256, false, VERIFY_X2);
+tmrx_entry!(k_refresh_tmrvpl_256, false, VERIFY_PL);
+tmrx_entry!(k_refresh_tmrfpl_256, true, VERIFY_TMR);
 pl_entry!(k_simplent_pl_256, Avx2, u64x4, simplent_pl);
 pl_entry!(k_simplent_pl_512, Avx512, u64x8, simplent_pl);

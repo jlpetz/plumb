@@ -16,6 +16,7 @@ use fearless_simd::prelude::*;
 use fearless_simd::{Avx512, u64x8};
 use plumb_lines::Line;
 use plumb_tiles::{Amx, ROW_BYTES, ROWS, T0, T1, T2, T3};
+use std::arch::asm;
 
 /// u64 per tile at stride 64 (1 KiB).
 const TILE_U64: usize = ROWS * ROW_BYTES / 8;
@@ -131,6 +132,95 @@ pub unsafe fn k_amx_strided_read_zmm_512(p: *const u64, n: usize) -> u64 {
     }
     let acc = (a0 | a1) | (a2 | a3);
     acc.to_array().iter().fold(0, |x, y| x | y)
+}
+
+/// TMR's whole mirror (`mirror_swap_whole!`) through tiles, per `MIRROR_CHUNK_U64` chunk: one
+/// round trip, as TMR's, 16 line pairs per pair of tiles, in one AMX session. See
+/// [`mirror_steps`].
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub fn k_amx_mirror(amx: Amx, buf: &mut [u64]) {
+    for c in buf.chunks(MIRROR_CHUNK_U64) {
+        check_mirror_chunk(c);
+    }
+    let (p, n) = (buf.as_mut_ptr() as *mut u8, buf.len() * 8);
+    amx.with_tiles(move |_| {
+        let chunk = MIRROR_CHUNK_U64 * 8;
+        for off in (0..n).step_by(chunk) {
+            let lines = chunk.min(n - off) / ROW_BYTES;
+            // SAFETY: in the session; each chunk passed `check_mirror_chunk`, and its whole
+            // round trip is `lines / ROWS` steps (even: the chunk is whole 4 KiB).
+            unsafe { mirror_steps(p.add(off), lines, lines / ROWS) };
+        }
+    })
+}
+
+/// [`mirror_steps`] on one chunk in its own session, for the tests: they stop it part way
+/// through the round trip to check the pairing. Panics unless `chunk` is 64-byte aligned and a
+/// whole number of 4 KiB, and `steps` is even and at most `chunk`'s 1 KiB blocks.
+#[cfg(test)]
+pub fn amx_mirror_steps(amx: Amx, chunk: &mut [u64], steps: usize) {
+    check_mirror_chunk(chunk);
+    let n_lines = chunk.len() / 8;
+    assert!(
+        steps.is_multiple_of(2) && steps <= n_lines / ROWS,
+        "steps must be even and within the chunk"
+    );
+    let p = chunk.as_mut_ptr() as *mut u8;
+    // SAFETY: in the session; the chunk and `steps` were checked above.
+    amx.with_tiles(move |_| unsafe { mirror_steps(p, n_lines, steps) })
+}
+
+fn check_mirror_chunk(chunk: &[u64]) {
+    assert!(
+        chunk.as_ptr().addr().is_multiple_of(64) && chunk.len().is_multiple_of(4 * TILE_U64),
+        "chunk must be aligned whole 4 KiB"
+    );
+}
+
+/// The first `steps` steps of TMR's whole mirror over a chunk of `n_lines` lines, 16 of TMR's
+/// line steps each. Step `b` tile-loads the 16 lines of block `b` at stride +64 and the 16
+/// lines ending at line `n - 1 - 16b` at stride -64 (from the top line down, so that tile holds
+/// them in descending order), then stores each tile in the other's place: line `16b + r` swaps
+/// with line `n - 1 - 16b - r`, TMR's pairing. Steps past the middle swap the pairs back, so all
+/// `n / 16` steps are one round trip. Two steps (4 tiles) per `asm!` block.
+///
+/// The -64 stride is why this is raw `asm!` inside a plumb_tiles session: the crate's safe API
+/// takes a `usize` stride.
+///
+/// # Safety
+/// Inside a plumb_tiles session (it configures every tile as 16 rows of 64 bytes); `p` valid
+/// for `n_lines` lines, 64-byte aligned, `n_lines` a multiple of 64; `steps` even and at most
+/// `n_lines / 16`.
+#[inline(always)]
+unsafe fn mirror_steps(p: *mut u8, n_lines: usize, steps: usize) {
+    let block = ROWS * ROW_BYTES;
+    for b in (0..steps).step_by(2) {
+        // SAFETY: lo, lo2 are blocks b and b+1; hi, hi2 the top lines of blocks nb-1-b and
+        // nb-2-b, read and written downwards 16 lines. All four blocks lie in the chunk and are
+        // distinct (nb is a multiple of 4 and b is even), so each is read before any is written.
+        unsafe {
+            let lo = p.add(b * block);
+            let hi = p.add((n_lines - 1 - b * ROWS) * ROW_BYTES);
+            asm!(
+                "tileloadd tmm0, [{lo} + {s}*1]",
+                "tileloadd tmm1, [{hi} + {ns}*1]",
+                "tileloadd tmm2, [{lo2} + {s}*1]",
+                "tileloadd tmm3, [{hi2} + {ns}*1]",
+                "tilestored [{lo} + {s}*1], tmm1",
+                "tilestored [{hi} + {ns}*1], tmm0",
+                "tilestored [{lo2} + {s}*1], tmm3",
+                "tilestored [{hi2} + {ns}*1], tmm2",
+                lo = in(reg) lo,
+                hi = in(reg) hi,
+                lo2 = in(reg) lo.add(block),
+                hi2 = in(reg) hi.sub(block),
+                s = in(reg) ROW_BYTES,
+                ns = in(reg) ROW_BYTES.wrapping_neg(),
+                options(nostack, preserves_flags),
+            );
+        }
+    }
 }
 
 /// Verify through tiles: tile-load a 1 KiB block from DRAM, store it to an L1 scratch, then

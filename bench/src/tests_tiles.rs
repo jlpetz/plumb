@@ -93,6 +93,73 @@ fn amx_copy() {
     assert_eq!(&dst[..n], &src[..n]);
 }
 
+/// TMR's mirror one line step at a time: step x swaps line x with line n-1-x.
+fn mirror_ref(b: &mut [u64], line_steps: usize) {
+    let n = b.len() / 8;
+    for x in 0..line_steps {
+        for k in 0..8 {
+            b.swap(x * 8 + k, (n - 1 - x) * 8 + k);
+        }
+    }
+}
+
+/// The tile mirror pairs lines as TMR does (the -64 stride really reads and writes the high end
+/// downwards), at every point of the round trip, and a whole round trip restores the chunk.
+#[test]
+fn amx_mirror_matches_tmrs_pairing() {
+    let Some(amx) = amx() else { return };
+    let n_lines = 256; // 16 KiB: 16 steps of 16 lines
+    let mut store = buf(n_lines * 8);
+    let orig: Vec<u64> = (0..n_lines as u64 * 8)
+        .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .collect();
+    for steps in [2, 6, 8, 10, 16] {
+        let b = words(&mut store);
+        b.copy_from_slice(&orig);
+        tiles::amx_mirror_steps(amx, b, steps);
+        let mut want = orig.clone();
+        mirror_ref(&mut want, steps * 16);
+        assert_eq!(&*b, &want[..], "after {steps} steps");
+    }
+    // Half way, every line is mirrored; the full round trip is the identity.
+    let b = words(&mut store);
+    b.copy_from_slice(&orig);
+    tiles::amx_mirror_steps(amx, b, 8);
+    for i in 0..n_lines {
+        assert_eq!(
+            b[i * 8..i * 8 + 8],
+            orig[(n_lines - 1 - i) * 8..][..8],
+            "line {i}"
+        );
+    }
+    let b = &mut words(&mut store)[..8 * 64];
+    let odd = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tiles::amx_mirror_steps(amx, b, 3)
+    }));
+    assert!(odd.is_err(), "odd steps must be refused");
+}
+
+/// The bench entries leave memory as they found it (one round trip per 4 MiB chunk), on more
+/// than one chunk, and so does TMR's zmm swap.
+#[test]
+fn mirror_entries_round_trip() {
+    let Some(amx) = amx() else { return };
+    let n = MIRROR_CHUNK_U64 * 2 + 4096;
+    let mut store = buf(n);
+    let b = words(&mut store);
+    for (i, w) in b.iter_mut().enumerate() {
+        *w = (i as u64) ^ POS_BASE;
+    }
+    let positional = |b: &[u64]| b.iter().enumerate().all(|(i, &w)| w == i as u64 ^ POS_BASE);
+    tiles::k_amx_mirror(amx, b);
+    assert!(positional(b), "amx round trip");
+    if Level::new().as_avx512().is_some() {
+        // SAFETY: aligned, a multiple of 8 u64; AVX-512F checked.
+        unsafe { crate::tmr::k_mirror_tmr_512(b.as_mut_ptr(), b.len()) };
+        assert!(positional(b), "zmm round trip");
+    }
+}
+
 #[test]
 fn amx_read_rejects_partial_tiles() {
     let Some(amx) = amx() else { return };

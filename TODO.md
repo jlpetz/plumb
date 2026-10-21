@@ -19,20 +19,25 @@ fixed (loop shape, not addressing); `asm!` costs and the lost unroll measured as
 **Next**: none; re-run after changes that touch a hot loop.
 
 ### 3. Share the NT design with Shnatsel
-**Status**: Not started. They asked to see NT stores tried in an extension crate first.
-**Next**: once the repo is public, post in the #simd topic: the `plumb_lines::nt` design (scoped
-writer, write-once slots, SFENCE on exit, four stores per `asm!` block) with the asm/parity
-results. Also say: (a) a correction to my earlier post, the 16% 512-bit L2 verify gap was LLVM
-unrolling and reassociating the OR loop (losing the fused `vpternlogq`), not indexed addressing;
-fearless's own `chunks_exact` verify shows it (`fs_512` 83%); (b) `plumb_tiles`' Linux path
-(`arch_prctl`) is compile-checked only, never run. Shnatsel (2026-10-04) suggests upstreaming
-`as_vectors`/`as_vectors_mut` into fearless_simd as an `as_simd()` safe `align_to` wrapper, built on
-its internal bytemuck-like layer (`SimdPod`); offer a PR, with the 512-bit loop-shape note.
+**Status**: Draft ready 2026-10-08, statuses checked that day (`fearlessD/upstream/zulip-followup.md`,
+about 4.9k characters, one reply in the existing TMR topic): the `plumb_lines::nt` design and
+parity results; hold NT upstreaming until llvm/llvm-project#229240 settles, since it would make
+NT a plain safe store with a hint; offer an `as_simd()` PR (Shnatsel's 2026-10-04 suggestion,
+built on fearless's `SimdPod` layer) with the 512-bit loop-shape note; the correction (the 16%
+L2 verify gap was unroll-and-reassociate, not indexed addressing); the untested Linux path.
+**Next**: the owner posts it; then the `as_simd()` PR in the shape Shnatsel picks.
 
 ### 4. clflushopt stabilization report (upstream)
-**Status**: Not started. `clflushopt` target feature (rust-lang/rust#157098) and `_mm_clflushopt`
-(rust-lang/stdarch#2141) landed in nightly 2026-05/06 under rust-lang/rust#157096.
-**Next**: draft the stabilization report for #157096 (usage: TMR, plumb_lines); the owner posts.
+**Status**: Drafted 2026-10-08 as the stabilization PR's description
+(`fearlessD/upstream/rust-clflushopt-stabilization.md`). It plans one rust-lang/rust PR for the
+target feature, its detection and `_mm_clflushopt` (`library/stdarch` is now a subtree), shaped
+like the keylocker stabilization (#140766). Nightly users: TMR, plumb_lines, valarauca/cafetensor.
+Evidence probe `TMR/clflushopt-proof-test`, timed 2026-10-21 (bench/RESULTS.md): after a
+clflushopt every read takes DRAM latency (141 ns against 5.6 from L2 and 48 from L3), and a
+dirty-range flush is 33x faster than with clflush (5.7 against 187 ns per line). The draft's
+tables are filled in.
+**Next**: prepare the branch (file list in the draft) and run tidy and the tests; a Reference
+PR; the owner opens the PR. Optional: AMD uProf counters on the m8a.metal host.
 
 ### 5. MOVDIR64B in rustc, std_detect and stdarch (upstream)
 **Status**: Sent upstream 2026-10-04, with MOVDIRI added: rust-lang/rust#163742 (target
@@ -63,8 +68,17 @@ L1/L2, except by-reference closure captures in an ordinary caller, ~10% slower f
 Documented as two calling practices (capture by value, or call from an `amx-tile` function);
 both measured equal to `asm!`. LLVM fix for the intrinsics' memory effects sent as
 llvm/llvm-project#229025 (approved by phoebewang 2026-10-05; plumb doesn't depend on it).
-**Next**: the TMR TODO 86 probe: does a 16-row x 8-byte AMX tile store beat AVX-512 scatter for
-TM5's strided u64 writes? Raw asm first; only add shapes to the crate if it wins.
+The TMR TODO 86 probe (16-row x 8-byte tile store vs AVX-512 scatter) was dropped 2026-10-08:
+TMR closed 86 as obsolete once its TODO 93 made the strided walk move whole lines, and for whole
+lines tiles already tie zmm in the bench (`amxstride`, `amxfill`). 2026-10-08: bench group
+`amxmirror`, TMR's whole MirrorMove through tiles, with the high end read and written at stride
+-64 (raw `asm!`, since plumb_tiles' stride is a `usize`). On this CPU it matches TMR's pairing at
+every step and takes 13 instructions per 32 line pairs, against about 160 for TMR's zmm swap.
+Timed 2026-10-21: 86-89% of TMR's swap in DRAM, 97% from L2, so no AMX MirrorMove for TMR.
+Owner's idea the same day, a memory test under tile-multiply load (write a pattern, transform it
+in place with `TDPBUUD`, verify against the precomputed result):
+`fearlessD/design/amx-transform-verify.md`.
+**Next**: the owner decides whether to prototype it (AMX, a VNNI version for AMD, or both).
 
 ### 7. ACE backend
 **Status**: Waiting: no hardware; LLVM PRs open (llvm-project#208408/#208706), nothing in rustc.
@@ -89,7 +103,11 @@ bandwidth change (DRAM-bound), as expected.
 **Next**: none.
 
 ### 11. Refresh at 256 bits: plumb 110-117% of the TMR-style port
-**Status**: Open (2026-10-03, three runs). The TMR-style port's 256-bit verify loop has an extra
-induction variable (14 instructions per 4 loads; 10 at 512); not shown to be the cause.
-**Next**: compare TMR-APP's own Refresh verify loop; if TMR has the same shape, it's a TMR fix
-(precomputed bound) and a TMR TODO, not a plumb claim.
+**Status**: Done 2026-10-21. TMR-APP's own Refresh has the port's verify loop and a less
+unrolled fill, so the port was faithful. Timed with one phase swapped at a time (bench
+`refreshx`): the gap moves between copies of identical code. `tmr_256` is now at parity with
+plumb, while its control `tmrx_256` runs at 86%: the same instructions, the same 64-byte
+offsets. So it's code placement or run order, not a source change TMR could make, and not a
+plumb advantage. Without the flush the styles are at parity (`refreshnf`). README and RESULTS
+corrected.
+**Next**: none; no TMR TODO.

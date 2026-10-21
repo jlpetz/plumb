@@ -105,8 +105,8 @@ fn usage() -> ! {
         "usage: plumb-bench [--quick] [--regime l2|dram|both] [--only ids] [--threads 1,2,4,6,8]\n\
          \x20      [--per-thread-mib 2048] [--pages huge|large|small] [--samples 5] [--cpu 2]\n\
          \x20      [--csv results.csv]\n\
-         group ids: fill verify4 posw posv lcgw flush sbnf; DRAM only: ntw wflush pfv copy\n\
-         \x20 fillflush sb refresh simplent"
+         group ids: fill verify4 posw posv lcgw flush sbnf amxmirror; DRAM only: ntw wflush pfv copy\n\
+         \x20 fillflush sb refresh refreshx refreshnf simplent"
     );
     std::process::exit(2)
 }
@@ -684,6 +684,20 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             t,
             2.0,
         ));
+        // TODO 11: what costs the TMR-style port at 256 bits, and whether Refresh without the
+        // flush (TMR's default) shows it too.
+        gs.push(port_group(
+            "refreshx",
+            "TMR Refresh port at 256 bits, one phase swapped (TODO 11)",
+            t,
+            2.0,
+        ));
+        gs.push(port_group(
+            "refreshnf",
+            "TMR Refresh port, no flush (TMR's default; sleep omitted)",
+            t,
+            2.0,
+        ));
         gs.push(port_group(
             "simplent",
             "TMR SimpleNT port: 4 x (NT positional write, 5 verifies) per chunk",
@@ -767,6 +781,25 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
                 setup: None, prime: Prime::Flush, expect_zero: false, bytes_mult: 1.0, variants: vs });
         }
     }
+    // MirrorMove through tiles: TMR's whole mirror (4 MiB chunks), 16 line pairs per pair of
+    // tiles with the high end at stride -64, against TMR's 512-bit swap. Both regimes: in DRAM
+    // the swap is bandwidth-bound; from L2 the tiles' 16x fewer instructions could show.
+    if let Some(amx) = t.amx {
+        let mut vs = vec![v!("amx", move |b| {
+            tiles::k_amx_mirror(amx, b);
+            0
+        })];
+        push_if(&mut vs, tmr512, v!("zmm_tmr_512", w(tmr::k_mirror_tmr_512)));
+        gs.push(Group {
+            id: "amxmirror",
+            title: "MirrorMove round trip, 4 MiB chunks: AMX tiles (high end at stride -64) vs TMR's zmm swap (2R+2W per byte)",
+            setup: None,
+            prime: if dram { Prime::Flush } else { Prime::None },
+            expect_zero: false,
+            bytes_mult: 4.0,
+            variants: vs,
+        });
+    }
     gs.push(port_group(
         "sbnf",
         "TMR StuckBit port, no flush (3 phases)",
@@ -823,6 +856,42 @@ fn port_group<'a>(
             }
             if let Some(t5) = t512 {
                 vs.push(v!("pl_512", move |b| tmrport::k_refresh_pl_512(t5, pcf, b)));
+            }
+        }
+        "refreshx" => {
+            // Each tmr*_256 swaps one thing in tmr_256; tmrx_256 swaps nothing (the control).
+            // bnd: verify bound computed once; x2: 8 vectors per verify iteration; vpl: plumb's
+            // verify; fpl: plumb's fill and flush.
+            vs.push(v!("tmr_256", tmrport::k_refresh_tmr_256));
+            vs.push(v!("tmrx_256", move |b| tmrport::k_refresh_tmrx_256(
+                t2, pcf, b
+            )));
+            vs.push(v!("tmrbnd_256", move |b| tmrport::k_refresh_tmrbnd_256(
+                t2, pcf, b
+            )));
+            vs.push(v!("tmrx2_256", move |b| tmrport::k_refresh_tmrx2_256(
+                t2, pcf, b
+            )));
+            vs.push(v!("tmrvpl_256", move |b| tmrport::k_refresh_tmrvpl_256(
+                t2, pcf, b
+            )));
+            vs.push(v!("tmrfpl_256", move |b| tmrport::k_refresh_tmrfpl_256(
+                t2, pcf, b
+            )));
+            vs.push(v!("pl_256", move |b| tmrport::k_refresh_pl_256(t2, pcf, b)));
+        }
+        "refreshnf" => {
+            vs.push(v!("tmr_256", tmrport::k_refreshnf_tmr_256));
+            vs.push(v!("pl_256", move |b| tmrport::k_refreshnf_pl_256(
+                t2, pcf, b
+            )));
+            if tmr512 {
+                vs.push(v!("tmr_512", tmrport::k_refreshnf_tmr_512));
+            }
+            if let Some(t5) = t512 {
+                vs.push(v!("pl_512", move |b| tmrport::k_refreshnf_pl_512(
+                    t5, pcf, b
+                )));
             }
         }
         "simplent" => {
