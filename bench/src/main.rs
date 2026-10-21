@@ -31,9 +31,12 @@ mod cap;
 mod common;
 mod fs;
 mod lines;
+mod load;
 mod mem;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_load;
 #[cfg(test)]
 mod tests_plumb;
 #[cfg(test)]
@@ -49,7 +52,7 @@ use std::hint::black_box;
 use std::io::Write as _;
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 type Run<'a> = Box<dyn Fn(&mut [u64]) -> u64 + Send + Sync + 'a>;
 
@@ -98,13 +101,16 @@ struct Opts {
     l2_samples: usize,
     cpu: usize,
     csv: String,
+    /// CPU load next to the test threads (load.rs), and its on/off duty.
+    load: Option<load::Kind>,
+    load_duty: load::Duty,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: plumb-bench [--quick] [--regime l2|dram|both] [--only ids] [--threads 1,2,4,6,8]\n\
          \x20      [--per-thread-mib 2048] [--pages huge|large|small] [--samples 5] [--cpu 2]\n\
-         \x20      [--csv results.csv]\n\
+         \x20      [--csv results.csv] [--load sse2|avx2|avx512|amx] [--load-duty on_us:off_us]\n\
          group ids: fill verify4 posw posv lcgw flush sbnf amxmirror; DRAM only: ntw wflush pfv copy\n\
          \x20 fillflush sb refresh refreshx refreshnf simplent"
     );
@@ -123,6 +129,8 @@ fn parse_opts() -> Opts {
         l2_samples: 21,
         cpu: 2,
         csv: "results.csv".into(),
+        load: None,
+        load_duty: load::Duty::CONTINUOUS,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -166,6 +174,8 @@ fn parse_opts() -> Opts {
             "--samples" => o.samples = num(i).max(1),
             "--cpu" => o.cpu = num(i),
             "--csv" => o.csv = val(i),
+            "--load" => o.load = Some(load::Kind::parse(&val(i)).unwrap_or_else(|| usage())),
+            "--load-duty" => o.load_duty = load::Duty::parse(&val(i)).unwrap_or_else(|| usage()),
             _ => usage(),
         }
         i += 2;
@@ -1068,6 +1078,99 @@ fn baseline_of(name: &str, names: &[&str]) -> Option<usize> {
 /// Allocate one region per worker, each from a thread pinned to that worker's CPU (so a
 /// multi-node box would place it locally). 1 GiB pages first, then 2 MiB; never 4 KiB unless
 /// asked for, and never a silent fallback: the page mix is printed.
+/// Test and load CPUs for `t` test threads with a load running: the load on each test core's
+/// other hyperthread, or, where cores have one thread, test and load on alternating cores.
+/// `None` if `t` test threads don't fit.
+fn load_placement(cores: &[Vec<usize>], t: usize) -> Option<(Vec<usize>, Vec<usize>)> {
+    if cores.iter().all(|c| c.len() >= 2) {
+        let c = cores.get(..t)?;
+        Some((
+            c.iter().map(|c| c[0]).collect(),
+            c.iter().map(|c| c[1]).collect(),
+        ))
+    } else {
+        let c = cores.get(..2 * t)?;
+        let pick = |odd| c.iter().skip(odd).step_by(2).map(|c| c[0]).collect();
+        Some((pick(0), pick(1)))
+    }
+}
+
+/// The load CPU for a single test thread on `cpu`: its core's other hyperthread, or the next
+/// core.
+fn load_partner(cores: &[Vec<usize>], cpu: usize) -> Option<usize> {
+    let k = cores.iter().position(|c| c.contains(&cpu))?;
+    if let Some(&sib) = cores[k].iter().find(|&&c| c != cpu) {
+        return Some(sib);
+    }
+    cores
+        .get((k + 1) % cores.len())
+        .filter(|_| cores.len() > 1)
+        .map(|c| c[0])
+}
+
+/// What the load threads did while a measurement ran.
+struct LoadReport {
+    /// Batches per second, per load thread.
+    rate: f64,
+    /// Values that differed from the reference: compute errors.
+    errors: u64,
+}
+
+/// Runs `f` with a load thread pinned to each of `cpus` (none if `load` is `None`).
+fn with_load<R>(
+    load: Option<(load::Kind, load::Duty)>,
+    cpus: &[usize],
+    f: impl FnOnce() -> R,
+) -> (R, Option<LoadReport>) {
+    let Some((kind, duty)) = load else {
+        return (f(), None);
+    };
+    let stop = AtomicBool::new(false);
+    let stats: Vec<load::Stats> = cpus.iter().map(|_| load::Stats::default()).collect();
+    let t0 = Instant::now();
+    let r = std::thread::scope(|s| {
+        for (&cpu, st) in cpus.iter().zip(&stats) {
+            let stop = &stop;
+            s.spawn(move || {
+                pin_to_cpu(cpu);
+                let l = load::Load::new(kind, &detect()).expect("load checked at startup");
+                l.run(duty, stop, st);
+            });
+        }
+        // Let the load threads reach their loops before the measurement starts.
+        std::thread::sleep(Duration::from_millis(50));
+        let r = f();
+        stop.store(true, Ordering::Relaxed);
+        r
+    });
+    let secs = t0.elapsed().as_secs_f64();
+    let sum = |f: fn(&load::Stats) -> u64| stats.iter().map(f).sum::<u64>();
+    let batches = sum(|s| s.batches.load(Ordering::Relaxed));
+    let errors = sum(|s| s.errors.load(Ordering::Relaxed));
+    let rate = batches as f64 / secs / cpus.len().max(1) as f64;
+    (r, Some(LoadReport { rate, errors }))
+}
+
+/// One report line for a group's load threads.
+fn load_line(kind: load::Kind, duty: load::Duty, reports: &[(usize, LoadReport)]) -> String {
+    let mut line = format!(
+        "   load {} ({}:{} us), batches/s per load thread:",
+        kind.name(),
+        duty.on_us,
+        duty.off_us
+    );
+    for (t, r) in reports {
+        line += &format!(" {t}T {:.0}", r.rate);
+    }
+    let errors: u64 = reports.iter().map(|(_, r)| r.errors).sum();
+    line += &if errors == 0 {
+        "; no compute errors".to_string()
+    } else {
+        format!("; COMPUTE ERRORS: {errors}")
+    };
+    line
+}
+
 fn alloc_regions(
     n: usize,
     bytes: usize,
@@ -1134,6 +1237,14 @@ fn main() {
         amx: plumb_tiles::Amx::try_new(),
     };
     let order = mem::cpu_order();
+    let cores = mem::cores();
+    let load = o.load.map(|k| (k, o.load_duty));
+    if let Some((kind, _)) = load
+        && load::Load::new(kind, &cpu).is_none()
+    {
+        eprintln!("--load {}: not supported on this CPU/OS", kind.name());
+        std::process::exit(2);
+    }
 
     println!("plumb-bench (TODO 84): TMR-style macro_rules!/std::simd vs fearless_simd 1.0");
     println!(
@@ -1166,9 +1277,12 @@ fn main() {
     let mut csv = std::fs::File::create(&o.csv).expect("create csv");
     writeln!(
         csv,
-        "regime,group,variant,threads,pages,median_gib_s,min_gib_s,max_gib_s,samples"
+        "regime,group,variant,threads,pages,median_gib_s,min_gib_s,max_gib_s,samples,load"
     )
     .unwrap();
+    let load_tag = load.map_or("none".to_string(), |(k, d)| {
+        format!("{}:{}:{}", k.name(), d.on_us, d.off_us)
+    });
 
     for &regime in &o.regimes {
         match regime {
@@ -1178,6 +1292,17 @@ fn main() {
                     "\n######## L2 regime: 1 thread on CPU {}, 256 KiB warm, median GiB/s [min..max]",
                     o.cpu
                 );
+                let l2_load: Vec<usize> = match load {
+                    Some((kind, _)) => {
+                        let Some(c) = load_partner(&cores, o.cpu) else {
+                            eprintln!("--load: no CPU to put the load on next to CPU {}", o.cpu);
+                            std::process::exit(2);
+                        };
+                        println!("load: {} on CPU {c}", kind.name());
+                        vec![c]
+                    }
+                    None => Vec::new(),
+                };
                 let mut buf = AlignedBuf::new(256 << 10);
                 for g in groups(&toks, regime) {
                     if g.variants.is_empty()
@@ -1197,7 +1322,9 @@ fn main() {
                         "\n== {} | {} ({} samples x {} reps)",
                         g.id, g.title, samples, reps
                     );
-                    let stats = run_l2(&g, buf.as_mut_slice(), reps, samples);
+                    let (stats, report) = with_load(load, &l2_load, || {
+                        run_l2(&g, buf.as_mut_slice(), reps, samples)
+                    });
                     let names: Vec<&str> = g.variants.iter().map(|v| v.name).collect();
                     println!(
                         "   {:<14} {:>9}   {:>19}   {:>7}",
@@ -1213,21 +1340,56 @@ fn main() {
                         );
                         writeln!(
                             csv,
-                            "l2,{},{},1,4 KiB,{:.3},{:.3},{:.3},{}",
-                            g.id, names[k], s.med, s.min, s.max, samples
+                            "l2,{},{},1,4 KiB,{:.3},{:.3},{:.3},{},{}",
+                            g.id, names[k], s.med, s.min, s.max, samples, load_tag
                         )
                         .unwrap();
+                    }
+                    if let (Some((kind, duty)), Some(r)) = (load, report) {
+                        println!("{}", load_line(kind, duty, &[(1, r)]));
                     }
                 }
             }
             Regime::Dram => {
+                // With a load, the test threads take the placement's test CPUs and only as many
+                // thread counts as leave room for a load thread each.
+                let fits = |t: usize| match load {
+                    Some(_) => load_placement(&cores, t).is_some(),
+                    None => t <= order.len(),
+                };
                 let threads: Vec<usize> = o
                     .threads
                     .iter()
                     .copied()
-                    .filter(|&t| t >= 1 && t <= order.len())
+                    .filter(|&t| t >= 1 && fits(t))
                     .collect();
+                if threads.len() < o.threads.len() {
+                    println!(
+                        "note: thread counts {:?} skipped (no room for them{})",
+                        o.threads
+                            .iter()
+                            .filter(|t| !threads.contains(t))
+                            .collect::<Vec<_>>(),
+                        if load.is_some() {
+                            " with a load thread each"
+                        } else {
+                            ""
+                        }
+                    );
+                }
                 let tmax = *threads.iter().max().unwrap_or(&1);
+                let (test_cpus, load_cpus) = match load {
+                    Some(_) => load_placement(&cores, tmax).expect("filtered above"),
+                    None => (order.clone(), Vec::new()),
+                };
+                if let Some((kind, _)) = load {
+                    println!(
+                        "load: {} on CPUs {:?} next to test CPUs {:?}",
+                        kind.name(),
+                        load_cpus,
+                        test_cpus
+                    );
+                }
                 let bytes = o.per_thread_mib << 20;
                 if o.pages != Pages::Small
                     && let Err(e) = mem::enable_lock_memory_privilege()
@@ -1237,7 +1399,7 @@ fn main() {
                     );
                     std::process::exit(1);
                 }
-                let regions = match alloc_regions(tmax, bytes, o.pages, &order) {
+                let regions = match alloc_regions(tmax, bytes, o.pages, &test_cpus) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!(
@@ -1268,9 +1430,17 @@ fn main() {
                     println!("\n== {} | {}", g.id, g.title);
                     let names: Vec<&str> = g.variants.iter().map(|v| v.name).collect();
                     let t_start = Instant::now();
+                    let mut reports = Vec::new();
                     let per_t: Vec<Vec<Stat>> = threads
                         .iter()
-                        .map(|&t| run_mt(&g, &regions, &order, t, o.samples))
+                        .map(|&t| {
+                            let cpus = &load_cpus[..load_cpus.len().min(t)];
+                            let (s, r) = with_load(load, cpus, || {
+                                run_mt(&g, &regions, &test_cpus, t, o.samples)
+                            });
+                            reports.extend(r.map(|r| (t, r)));
+                            s
+                        })
                         .collect();
                     let mut hdr = format!("   {:<12}", "variant");
                     for t in &threads {
@@ -1294,8 +1464,8 @@ fn main() {
                             }
                             writeln!(
                                 csv,
-                                "dram,{},{},{},{},{:.3},{:.3},{:.3},{}",
-                                g.id, name, t, pages, s.med, s.min, s.max, o.samples
+                                "dram,{},{},{},{},{:.3},{:.3},{:.3},{},{}",
+                                g.id, name, t, pages, s.med, s.min, s.max, o.samples, load_tag
                             )
                             .unwrap();
                         }
@@ -1310,6 +1480,9 @@ fn main() {
                         worst.2,
                         t_start.elapsed().as_secs_f64()
                     );
+                    if let Some((kind, duty)) = load {
+                        println!("{}", load_line(kind, duty, &reports));
+                    }
                 }
                 drop(regions);
             }

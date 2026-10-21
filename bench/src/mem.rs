@@ -204,7 +204,9 @@ pub fn alloc(bytes: usize, pages: Pages) -> Result<Region, u32> {
 
 /// Logical CPUs ordered physical-cores-first: the first thread of every core, then the second
 /// (SMT siblings), so N threads use N distinct cores while N <= cores.
-pub fn cpu_order() -> Vec<usize> {
+/// The logical CPUs of each physical core, in the order Windows lists the cores. If the query
+/// fails, every logical CPU counts as its own core.
+pub fn cores() -> Vec<Vec<usize>> {
     let mut len = 0u32;
     // SAFETY: size query with a null buffer.
     unsafe { GetLogicalProcessorInformation(std::ptr::null_mut(), &mut len) };
@@ -212,17 +214,21 @@ pub fn cpu_order() -> Vec<usize> {
     let mut info = vec![SYSTEM_LOGICAL_PROCESSOR_INFORMATION::default(); n];
     // SAFETY: buffer sized from the query above.
     if unsafe { GetLogicalProcessorInformation(info.as_mut_ptr(), &mut len) } == 0 {
-        return (0..std::thread::available_parallelism().map_or(1, |n| n.get())).collect();
+        let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+        return (0..n).map(|c| vec![c]).collect();
     }
-    let cores: Vec<Vec<usize>> = info
-        .iter()
+    info.iter()
         .filter(|i| i.Relationship == RelationProcessorCore)
         .map(|i| {
             (0..usize::BITS as usize)
                 .filter(|b| i.ProcessorMask >> b & 1 == 1)
                 .collect()
         })
-        .collect();
+        .collect()
+}
+
+pub fn cpu_order() -> Vec<usize> {
+    let cores = cores();
     let smt = cores.iter().map(Vec::len).max().unwrap_or(1);
     let mut order = Vec::new();
     for round in 0..smt {
