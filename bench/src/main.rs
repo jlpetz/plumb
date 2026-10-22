@@ -41,9 +41,13 @@ mod tests_load;
 mod tests_plumb;
 #[cfg(test)]
 mod tests_tiles;
+#[cfg(test)]
+mod tests_xform;
 mod tiles;
 mod tmr;
 mod tmrport;
+#[allow(dead_code)] // wired into a bench group next (design doc item 3); the tests use it now
+mod xform;
 
 use common::*;
 use fearless_simd::{Avx2, Avx512, Level};
