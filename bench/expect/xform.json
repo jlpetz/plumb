@@ -1,0 +1,10 @@
+{
+  "_comment": "Expectations for bench/src/xform.rs (transform-verify, plumb TODO 6). Each phase is one tile session over the buffer; W is tile loads and stores (it was a memcpy per tile); RW keeps the transform matrix in a tile (no reload per tile); the rotation is a mask with X a const generic (it was a div per tile). The defaults apply too: no call or vector spill in an innermost loop, no memset/memcpy.",
+  "special": ["tdpbuud"],
+  "expect": [
+    ["^k_xform_", {"need": ["ldtilecfg", "tilerelease"], "loop_forbid": ["div", "idiv"]}],
+    ["^k_xform_write_", {"loop_need": ["tileloadd", "tilestored"]}],
+    ["^k_xform_transform$", {"loop_need": ["tileloadd", "tdpbuud", "tilestored"]}],
+    ["^k_xform_verify_", {"loop_need": ["tileloadd", "tdpbuud"]}]
+  ]
+}

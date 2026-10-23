@@ -6,37 +6,53 @@
 //! bench's `--only` groups yet (that's timing, item 3 of the design's prototype plan, which
 //! needs the box); this module is items 1 and 2, the kernels and their correctness tests.
 //!
-//! Per chunk ("group" of `x` tiles): **W** fills each 1 KiB tile with a pattern from a set of
-//! `x` (a rotation decides which tile gets which pattern); **RW** loads each tile, multiplies
-//! it by a fixed transform matrix `K` (`TDPBUUD`), and stores the 16x16 u32 result back in
-//! place, so memory now holds `T(P) = P x K`; **R** loads each tile again and multiplies it
-//! into a group checksum with that pattern's own key matrix, `1 + r` times with `1 + r`
-//! independent keys (`r` is the CPU-load setting), comparing each checksum with the value
-//! expected for a clean group. A mismatch runs tier 2: an exact compare of every tile in the
-//! group against its expected value, which locates the bad tile and, in the common case of one
-//! flipped bit, the byte and bit.
+//! Three phases, each one pass over the whole buffer in one tile session, as TM5 streams its
+//! phases. A group is `X` consecutive 1 KiB tiles and holds each of the set's `X` patterns once.
+//! **W** ([`write`]) stores each tile's pattern, in a rotation that changes every pass
+//! ([`rotation`]). **RW** ([`transform`]) loads each tile, multiplies it by the set's transform
+//! matrix `K` (`TDPBUUD`) and stores the 16x16 u32 result in place, so memory holds
+//! `T(P) = P x K`. **R** ([`verify`]) loads each tile once with its pattern's own matrix and
+//! adds their product into the group's running checksum `1 + r` times (`r` is the CPU-load
+//! setting, owner's decision 2026-10-22), then compares the checksum with the constant every
+//! clean group gives. Every multiply's result is in the checksum, so a matrix unit that
+//! miscomputes under load shows as a mismatch too. A mismatch runs tier 2 at once
+//! ([`GroupError`]): a rescan of the group against `T(P_i)`, which locates every bad word, TMR's
+//! rereads, and the checksum again through the tiles.
 //!
-//! Every matrix byte is odd, by construction, which alone guarantees a single flipped bit in a
-//! tile always changes a checksum it's part of (see [`PatternSet::new`]'s doc). Two flipped
-//! bits could in principle cancel only if two matrix rows coincided; rows are generated
-//! distinct across the whole set to rule that out. Three or more is not ruled out formally;
-//! `tests_xform.rs`'s fault injection measures it rather than claims it (the design doc's own
-//! framing).
+//! [`PatternSet::new`] has what's guaranteed: any one or two flipped bits in a group's stored
+//! result change the checksum, at any `r`. Flips in the pattern before the transform, and three
+//! or more, are measured by `tests_xform.rs`, not guaranteed.
 //!
-//! **Independence of the expected values.** `PatternSet::new` computes every expected value
-//! two ways: on the AMX multiply unit (the operational path) and with a plain scalar
-//! implementation ([`scalar_multiply`], never touching AMX). They're asserted equal, which
-//! checks the multiply unit computes correctly before any test trusts it. A shipped build could
-//! also embed one fixed pattern set's values as literal constants generated offline (skipping
-//! even this scalar recompute at startup for that one set); this prototype always recomputes
-//! and cross-checks, which is strictly more evidence and works for every seed, not just one.
+//! The expected values are computed on the tiles, by these kernels. The built-in set's group
+//! checksum is also stored in the binary (`xform_builtin.rs`, generated offline by the scalar
+//! reference in `tests_xform.rs`), and [`self_test`] compares the two before a run relies on
+//! the matrix unit.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use plumb_tiles::{AmxInt8, ROW_BYTES, T0, T4, T5, TILE_BYTES};
+use std::arch::x86_64::{_mm_clflush, _mm_mfence};
+use std::collections::HashSet;
+use std::ptr::read_volatile;
+
+use plumb_tiles::{AmxInt8, ROW_BYTES, T0, T1, T4, T5, T6, T7, TILE_BYTES, Tiles};
 
 /// u64 words per tile (1 KiB).
 pub const TILE_U64: usize = TILE_BYTES / 8;
+
+/// The most extra multiplies per tile (`r`): `1 + r` times any one- or two-bit fault's change
+/// to the checksum, which is below 2^16, stays below 2^32, so it can't wrap to zero.
+pub const MAX_R: usize = 65534;
+
+/// The built-in set's seed (X = 16): its patterns and matrices, whose group checksum
+/// `xform_builtin.rs` stores. "TMR_XFM1".
+pub const BUILTIN_SEED: u64 = 0x544D_525F_5846_4D31;
+
+include!("xform_builtin.rs");
+
+/// How many bad words a rescan rereads, and how many times each before the flush: TMR's
+/// `REREAD_WORDS` and `REREADS` (TMR-APP `src/tests.rs`).
+const REREAD_WORDS: usize = 4;
+const REREADS: u32 = 4;
 
 /// One tile's worth of data: a pattern, or memory holding `T(P)`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,37 +65,21 @@ pub struct Tile(pub [u64; TILE_U64]);
 pub struct Matrix(pub [u64; TILE_U64]);
 
 impl Matrix {
-    fn bytes(&self) -> [u8; TILE_BYTES] {
-        words_to_bytes(&self.0)
-    }
-
     /// Logical entry `[j][n]`, `j` < 64, `n` < 16.
-    fn get(&self, j: usize, n: usize) -> u8 {
-        self.bytes()[(j / 4) * ROW_BYTES + 4 * n + j % 4]
+    pub fn get(&self, j: usize, n: usize) -> u8 {
+        let byte = (j / 4) * ROW_BYTES + 4 * n + j % 4;
+        (self.0[byte / 8] >> (byte % 8 * 8)) as u8
     }
 
-    /// Physical tile row `r` (64 bytes): `r = j / 4` of the logical layout above.
-    fn row(&self, r: usize) -> [u64; 8] {
-        self.0[r * 8..r * 8 + 8].try_into().expect("8 words")
+    /// Logical row `j`, `[j][0..16]`: what byte `j` of a data row is multiplied by, one entry
+    /// per output column.
+    pub fn row(&self, j: usize) -> [u8; 16] {
+        std::array::from_fn(|n| self.get(j, n))
     }
-}
-
-fn words_to_bytes(words: &[u64; TILE_U64]) -> [u8; TILE_BYTES] {
-    let mut b = [0u8; TILE_BYTES];
-    for (w, chunk) in words.iter().zip(b.as_chunks_mut::<8>().0) {
-        *chunk = w.to_le_bytes();
-    }
-    b
-}
-
-fn bytes_to_words(bytes: &[u8; TILE_BYTES]) -> [u64; TILE_U64] {
-    std::array::from_fn(|i| {
-        u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().expect("8 bytes"))
-    })
 }
 
 /// A tiny xorshift64 stream, seeded, used only to generate deterministic test data (patterns
-/// and matrices) — not a cryptographic generator, and not part of what's being tested.
+/// and matrices): not a cryptographic generator, and not part of what's being tested.
 struct Rng(u64);
 
 impl Rng {
@@ -94,160 +94,47 @@ impl Rng {
         self.0 = x;
         x
     }
-    fn next_byte(&mut self) -> u8 {
-        self.next_u64() as u8
-    }
 }
 
-/// A matrix with every byte odd (forced with `| 1`): the property that makes a single flipped
-/// bit in an operand always change the product (see [`PatternSet::new`]).
-fn odd_matrix(rng: &mut Rng) -> Matrix {
-    let bytes: [u8; TILE_BYTES] = std::array::from_fn(|_| rng.next_byte() | 1);
-    Matrix(bytes_to_words(&bytes))
-}
-
-/// `count` matrices, every byte odd, with every physical row (64 bytes) distinct across all of
-/// them: the property that rules out two flipped bits cancelling in a checksum (see
-/// [`PatternSet::new`]). Collisions are astronomically unlikely (64 odd bytes: a 2^504 space)
-/// and are retried if they somehow occur, so this always terminates.
+/// `count` matrices with every byte odd and every logical row ([`Matrix::row`]) distinct,
+/// within each matrix and across them: the two properties [`PatternSet::new`]'s guarantees
+/// rest on. Rows are 16 odd bytes (a 2^112 space), so a repeat is astronomically unlikely; a
+/// matrix with one is drawn again.
 fn distinct_odd_matrices(count: usize, rng: &mut Rng) -> Vec<Matrix> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        let mut m = odd_matrix(rng);
-        while (0..16).any(|r| !seen.insert(m.row(r))) {
-            for r in 0..16 {
-                seen.remove(&m.row(r)); // undo partial inserts from the rejected draw
-            }
-            m = odd_matrix(rng);
+    while out.len() < count {
+        let m = Matrix(std::array::from_fn(|_| {
+            rng.next_u64() | 0x0101_0101_0101_0101
+        }));
+        let rows: HashSet<[u8; 16]> = (0..64).map(|j| m.row(j)).collect();
+        if rows.len() == 64 && rows.is_disjoint(&seen) {
+            seen.extend(rows);
+            out.push(m);
         }
-        for r in 0..16 {
-            seen.insert(m.row(r));
-        }
-        out.push(m);
     }
     out
 }
 
-/// `x` pattern tiles: four classic patterns (all-zero, all-one, and the two checkerboards),
-/// then `x - 4` seeded pseudo-random tiles, up to `x`. (`x` <= 4 just takes the first `x`
-/// classics.)
-fn gen_patterns(x: usize, rng: &mut Rng) -> Vec<Tile> {
-    let classic: [u64; 4] = [
-        0x0000_0000_0000_0000,
-        0xFFFF_FFFF_FFFF_FFFF,
-        0xAAAA_AAAA_AAAA_AAAA,
-        0x5555_5555_5555_5555,
+/// The set's `X` pattern tiles: the classic memory-test patterns (solid zeros and ones, the two
+/// checkerboards, walking ones and walking zeros along each word), then seeded pseudo-random
+/// tiles.
+fn gen_patterns<const X: usize>(rng: &mut Rng) -> Box<[Tile; X]> {
+    let walk = |w: usize| 1u64 << (w % 64);
+    let classic = [
+        Tile([0; TILE_U64]),
+        Tile([!0; TILE_U64]),
+        Tile([0xAAAA_AAAA_AAAA_AAAA; TILE_U64]),
+        Tile([0x5555_5555_5555_5555; TILE_U64]),
+        Tile(std::array::from_fn(walk)),
+        Tile(std::array::from_fn(|w| !walk(w))),
     ];
-    let mut out = Vec::with_capacity(x);
-    for &w in classic.iter().take(x) {
-        out.push(Tile([w; TILE_U64]));
-    }
-    while out.len() < x {
-        out.push(Tile(std::array::from_fn(|_| rng.next_u64())));
-    }
-    out
+    let random = std::iter::repeat_with(|| Tile(std::array::from_fn(|_| rng.next_u64())));
+    let all: Vec<Tile> = classic.into_iter().chain(random).take(X).collect();
+    all.try_into().expect("X tiles")
 }
 
-/// `A x B` (INT8 x INT8 -> INT32, wrapping), as TDPBUUD defines it: `A` the 16x64-byte operand
-/// (`tile`, row-major), `B` the VNNI-packed matrix. A plain scalar loop, independent of AMX;
-/// used only to cross-check the AMX-computed expected values ([`PatternSet::new`]) and in
-/// `tests_xform.rs`'s fault injection, never in the hot path.
-fn scalar_multiply(tile: &[u64; TILE_U64], b: &Matrix) -> [[u32; 16]; 16] {
-    let a = words_to_bytes(tile);
-    std::array::from_fn(|m| {
-        std::array::from_fn(|n| {
-            let mut sum = 0u32;
-            for j in 0..64 {
-                sum = sum.wrapping_add((a[m * 64 + j] as u32).wrapping_mul(b.get(j, n) as u32));
-            }
-            sum
-        })
-    })
-}
-
-/// The 16x16 u32 grid packed the way `TILESTORED` lays an accumulator out in memory: row `m`,
-/// dwords `n` and `n+1`, little-endian, at word `m*8 + n/2`.
-fn grid_to_tile(c: &[[u32; 16]; 16]) -> Tile {
-    let mut words = [0u64; TILE_U64];
-    for (m, row) in c.iter().enumerate() {
-        for half in 0..8 {
-            words[m * 8 + half] = (row[half * 2] as u64) | ((row[half * 2 + 1] as u64) << 32);
-        }
-    }
-    Tile(words)
-}
-
-/// The inverse of [`grid_to_tile`].
-fn tile_to_grid(t: &Tile) -> [[u32; 16]; 16] {
-    std::array::from_fn(|m| {
-        std::array::from_fn(|n| {
-            let w = t.0[m * 8 + n / 2];
-            if n % 2 == 0 {
-                w as u32
-            } else {
-                (w >> 32) as u32
-            }
-        })
-    })
-}
-
-/// `A x B` via AMX (`TDPBUUD`, accumulator zeroed first). Setup-time use only (building
-/// [`PatternSet`]'s expected values): not performance-sensitive, so this captures its by-value
-/// arguments without extra ceremony.
-fn amx_multiply(int8: AmxInt8, a: &[u64; TILE_U64], b: &Matrix) -> Tile {
-    let (a, b) = (*a, b.0);
-    let mut out = [0u64; TILE_U64];
-    // `&mut out_ref` (a reference, never `Copy`) is what the `move` closure takes: a `move`
-    // closure over a `Copy` local like `&mut out` directly would capture ITS OWN COPY of
-    // `out`, write into that, and leave the outer `out` untouched (`[u64; N]` arrays are
-    // `Copy`, unlike `load.rs`'s pattern, which always moves an already-`&mut`-typed
-    // parameter, never a local array).
-    let out_ref = &mut out;
-    int8.with_tiles(move |t| {
-        t.load_u64::<T4>(&a, ROW_BYTES);
-        t.load_u64::<T5>(&b, ROW_BYTES);
-        t.zero::<T0>();
-        t.dpbuud::<T0, T4, T5>(int8);
-        t.store_u64::<T0>(out_ref, ROW_BYTES);
-    });
-    Tile(out)
-}
-
-/// `sum over i of a[i] x b[i]` via AMX, one accumulator across the whole list (`TDPBUUD`
-/// without re-zeroing between calls, matching the hardware's own INT32-wrapping `+=`). Setup
-/// time only, as [`amx_multiply`].
-fn amx_accumulate(int8: AmxInt8, pairs: &[(&[u64; TILE_U64], &Matrix)]) -> Tile {
-    let mut out = [0u64; TILE_U64];
-    int8.with_tiles(|t| {
-        t.zero::<T0>();
-        for (a, b) in pairs {
-            t.load_u64::<T4>(*a, ROW_BYTES);
-            t.load_u64::<T5>(&b.0, ROW_BYTES);
-            t.dpbuud::<T0, T4, T5>(int8);
-        }
-        t.store_u64::<T0>(&mut out, ROW_BYTES);
-    });
-    Tile(out)
-}
-
-/// `sum over i of scalar_multiply(a[i], b[i])`, INT32-wrapping. The scalar counterpart of
-/// [`amx_accumulate`], for the same cross-check.
-fn scalar_accumulate(pairs: &[(&[u64; TILE_U64], &Matrix)]) -> [[u32; 16]; 16] {
-    let mut sum = [[0u32; 16]; 16];
-    for (a, b) in pairs {
-        let c = scalar_multiply(a, b);
-        for m in 0..16 {
-            for n in 0..16 {
-                sum[m][n] = sum[m][n].wrapping_add(c[m][n]);
-            }
-        }
-    }
-    sum
-}
-
-/// splitmix64's finalizer: a cheap, well-mixed hash of a group index, used to offset the
-/// pattern rotation (see [`pattern_index`]).
+/// splitmix64's finalizer: a cheap, well-mixed hash, used to key the rotation.
 fn hash64(mut x: u64) -> u64 {
     x ^= x >> 33;
     x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -257,406 +144,668 @@ fn hash64(mut x: u64) -> u64 {
     x
 }
 
-/// Which pattern (0..`x`) sits at tile position `t` (0..`x`) within group `group`, on pass
-/// `pass`: a cyclic rotation by `pass`, offset by a hash of the group index, so every location
-/// sees every pattern over `x` passes, and two locations `x` tiles apart don't always hold the
-/// same pattern. `x` must be a power of two (checked by [`PatternSet::new`]), so `% x` is cheap.
-fn pattern_index(x: usize, group: usize, pass: usize, t: usize) -> usize {
-    let h = hash64(group as u64) as usize;
-    (t + pass + h) % x
+/// The rotation offset of group `g` on pass `pass`: tile `t` of the group holds pattern
+/// `(t + offset) % X`.
+///
+/// Over each cycle of `X` passes the offsets are a permutation of `0..X`, so every tile holds
+/// every pattern once a cycle. The permutation is an affine step, an xorshift and another
+/// affine step, each a bijection mod `X` (odd multipliers), keyed by a hash of the layout seed,
+/// the group and the cycle. Its `X^4 / 4` keys give as many distinct permutations (counted at
+/// X = 16 and 32), so two groups hold the same data on a given pass 1 time in `X`, and on every
+/// pass of a cycle (hiding an addressing fault between them for that cycle) 1 time in
+/// `X^4 / 4`, a different pair each cycle.
+#[inline(always)]
+fn rotation<const X: usize>(layout: u64, g: usize, pass: usize) -> usize {
+    let m = X - 1;
+    let k = hash64(hash64(layout ^ g as u64).wrapping_add((pass / X) as u64)) as usize;
+    let v = (pass & m).wrapping_mul(k | 1).wrapping_add(k >> 8) & m;
+    let v = v ^ (v >> (X.trailing_zeros() / 2));
+    v.wrapping_mul((k >> 16) | 1).wrapping_add(k >> 24) & m
 }
 
-/// A pattern set: `x` pattern tiles, the shared transform matrix, `checks` = `1 + r` checksum
-/// matrices per pattern, and every expected value the test compares against.
-pub struct PatternSet {
-    x: usize,
-    checks: usize,
-    patterns: Vec<Tile>,
+/// A pattern set: `X` pattern tiles (16, 32 or 64), the transform matrix, a checksum matrix per
+/// pattern, the CPU-load setting `r`, and every expected value the test compares against.
+pub struct PatternSet<const X: usize> {
+    r: usize,
+    /// Keys the rotation: the run's seed.
+    layout: u64,
+    patterns: Box<[Tile; X]>,
     transform: Matrix,
-    /// `checksum_keys[c][i]`: check `c`'s matrix for pattern `i`.
-    checksum_keys: Vec<Vec<Matrix>>,
+    /// The checksum matrix of each pattern.
+    keys: Box<[Matrix; X]>,
     /// `T(P_i)` for each pattern.
-    expected_t: Vec<Tile>,
-    /// The group checksum for each check, the same for every group and pass (every group holds
-    /// every pattern exactly once).
-    expected_checksum: Vec<Tile>,
+    expected_t: Box<[Tile; X]>,
+    /// The group checksum at `r` = 0, `E = sum_i T(P_i) x K_i`. It is the same for every group
+    /// and pass: a group holds every pattern once and multiplies each by its own matrix,
+    /// whatever the rotation.
+    checksum: Tile,
+    /// The group checksum the R pass compares with, at this set's `r`: `(1 + r) E`.
+    expected_sum: Tile,
 }
 
-impl PatternSet {
-    /// Builds a set of `x` patterns (`x` a power of two, 16/32/64 suggested; TMR's chunk sizes
-    /// are multiples of 4 KiB = 4 tiles, so `x` up to 64 always fits) with `checks` = `1 + r`
-    /// independent checksum matrices per pattern (`r` the CPU-load setting: `r` is extra work
-    /// in the R pass over and above the one real check).
+impl<const X: usize> PatternSet<X> {
+    /// A set from `seed` (patterns, matrices and the rotation's layout), with `r` extra
+    /// multiplies per tile in the R pass (the CPU-load setting), its expected values computed
+    /// on the tiles.
     ///
-    /// Every matrix byte is odd (`[odd_matrix`]/[`distinct_odd_matrices`]): flipping one bit of
-    /// a byte changes it by `d = +-2^b`, and for any odd `k`, `d * k` is never 0 mod 2^32 (`d`
-    /// is a nonzero power of two up to 128, `k` is odd and nonzero, so `|d*k| < 2^16`, far from
-    /// wrapping). So a single flipped bit always changes every checksum it contributes to.
-    /// Two flips can only cancel in one checksum if they hit the same bit of two matrix entries
-    /// whose *rows* coincide; [`distinct_odd_matrices`] makes every row of every checksum
-    /// matrix distinct, which rules that out. Three or more is not ruled out by construction;
-    /// `tests_xform.rs` measures it with fault injection.
+    /// Every matrix byte is odd, and the logical matrix rows ([`Matrix::row`]) are all distinct
+    /// across the set's `X` matrices. That gives two guarantees:
     ///
-    /// Panics if the AMX-computed expected values disagree with an independent scalar
-    /// computation (see the module doc): that would mean the CPU's multiply unit is already
-    /// wrong, before any memory is tested.
-    pub fn new(int8: AmxInt8, x: usize, checks: usize, seed: u64) -> PatternSet {
-        assert!(
-            x.is_power_of_two() && (2..=64).contains(&x),
-            "x must be a power of two, 2..=64"
-        );
-        assert!(
-            checks >= 1 && checks + 2 <= 8,
-            "checks (1 + r) must leave room for 2 operand tiles"
-        );
+    /// - **Any single flipped bit in a group's stored result** changes byte `j` of data row `m`
+    ///   by `d = +-2^b`, and so the checksum's row `m` by `d * K[j][n]` in each of its 16
+    ///   entries. With `K` odd, `|d * K| < 2^15` is never 0 mod 2^32.
+    /// - **Any two.** Changes in different rows can't cancel. In one row, `d1 * K1[j1][n]` and
+    ///   `d2 * K2[j2][n]` cancel for all 16 `n` only if they're equal and opposite: since both
+    ///   matrices are odd, `|d1| = |d2|` (the same bit, flipped in opposite directions) and the
+    ///   rows `K1[j1]` and `K2[j2]` are equal, which the construction rules out.
+    ///
+    /// Each product goes into the checksum `1 + r` times, so a fault changes it by `1 + r` times
+    /// its change at `r` = 0. That is below 2^16 in both cases above, and `1 + r` is at most
+    /// 65535 ([`MAX_R`]), so the product stays below 2^32 and nonzero.
+    ///
+    /// The transform's 64 rows are distinct too, so a bit flipped before the transform leaves a
+    /// row delta that names its byte (tier 2's [`Signature::BeforeTransform`]).
+    ///
+    /// # Panics
+    ///
+    /// If `r` is over [`MAX_R`].
+    pub fn new(int8: AmxInt8, r: usize, seed: u64) -> Self {
+        Self::build(int8, r, seed, seed)
+    }
+
+    fn build(int8: AmxInt8, r: usize, seed: u64, layout: u64) -> Self {
+        const { assert!(X == 16 || X == 32 || X == 64, "X must be 16, 32 or 64") };
+        assert!(r <= MAX_R, "r must be at most {MAX_R}");
         let mut rng = Rng::new(seed);
-        let patterns = gen_patterns(x, &mut rng);
-        let transform = odd_matrix(&mut rng);
-        let checksum_keys: Vec<Vec<Matrix>> = (0..checks)
-            .map(|_| distinct_odd_matrices(x, &mut rng))
-            .collect();
+        let patterns = gen_patterns::<X>(&mut rng);
+        let transform = distinct_odd_matrices(1, &mut rng)[0];
+        let keys: Box<[Matrix; X]> = distinct_odd_matrices(X, &mut rng)
+            .try_into()
+            .expect("X matrices");
 
-        let expected_t: Vec<Tile> = patterns
+        // T(P_i) through the RW kernel, then the checksums of a group holding them in order
+        // (rotation 0) through the R kernel's loop, at r = 0 and at this set's r.
+        let mut t: Vec<u64> = patterns.iter().flat_map(|p| p.0).collect();
+        // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `transform_tiles` and
+        // `group_checksum` enable.
+        let (checksum, expected_sum) = unsafe {
+            transform_tiles(int8, &transform, &mut t);
+            (
+                group_checksum::<X>(int8, &keys, &t, 0),
+                group_checksum::<X>(int8, &keys, &t, r),
+            )
+        };
+        let expected_t = t
+            .as_chunks::<TILE_U64>()
+            .0
             .iter()
-            .map(|p| {
-                let amx = amx_multiply(int8, &p.0, &transform);
-                let scalar = grid_to_tile(&scalar_multiply(&p.0, &transform));
-                assert_eq!(
-                    amx, scalar,
-                    "AMX multiply unit disagrees with the scalar reference (transform)"
-                );
-                amx
-            })
-            .collect();
-
-        let expected_checksum: Vec<Tile> = (0..checks)
-            .map(|c| {
-                let pairs: Vec<(&[u64; TILE_U64], &Matrix)> = expected_t
-                    .iter()
-                    .zip(&checksum_keys[c])
-                    .map(|(t, k)| (&t.0, k))
-                    .collect();
-                let amx = amx_accumulate(int8, &pairs);
-                let scalar = grid_to_tile(&scalar_accumulate(&pairs));
-                assert_eq!(
-                    amx, scalar,
-                    "AMX multiply unit disagrees with the scalar reference (checksum)"
-                );
-                amx
-            })
-            .collect();
-
+            .map(|w| Tile(*w))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("X tiles");
         PatternSet {
-            x,
-            checks,
+            r,
+            layout,
             patterns,
             transform,
-            checksum_keys,
+            keys,
             expected_t,
-            expected_checksum,
+            checksum,
+            expected_sum,
         }
     }
 
-    pub fn x(&self) -> usize {
-        self.x
+    pub fn r(&self) -> usize {
+        self.r
     }
 
-    pub fn checks(&self) -> usize {
-        self.checks
-    }
-
-    /// Words per group (`x` whole tiles).
-    pub fn group_words(&self) -> usize {
-        self.x * TILE_U64
-    }
-
-    /// `T(pattern i)`: what a clean tile holding pattern `i` looks like after RW. For tests.
-    #[cfg(test)]
-    pub fn expected(&self, i: usize) -> Tile {
-        self.expected_t[i]
-    }
-
-    /// Pattern `i`'s raw bytes, before the transform. For tests.
-    #[cfg(test)]
-    pub fn pattern(&self, i: usize) -> Tile {
-        self.patterns[i]
-    }
-
-    /// Which pattern (0..`x`) the rotation puts at tile position `t` of group `group` on pass
-    /// `pass`. For tests; the real pipeline computes this itself in [`run_group`].
-    #[cfg(test)]
-    pub fn rotation(&self, group: usize, pass: usize, t: usize) -> usize {
-        pattern_index(self.x, group, pass, t)
+    /// Words per group (`X` whole tiles).
+    pub const fn group_words() -> usize {
+        X * TILE_U64
     }
 }
 
-/// What tier 2 found for one bad tile. `group`, `pattern` and `diffs` aren't read by this
-/// prototype's own tests (which key on `tile` and `before_transform`); they're here for the
-/// bench reporting and TMR integration the design doc's item 3 plans.
+impl PatternSet<16> {
+    /// The built-in set (X = 16, [`BUILTIN_SEED`]) with `r` extra multiplies and the run's
+    /// `layout` seed for the rotation. `None` if its group checksum, computed on the tiles,
+    /// differs from the one stored in the binary: the matrix unit computes wrongly, before any
+    /// memory is tested.
+    ///
+    /// Comparing the checksum covers every `T(P_i)` as well: it sums them all, each times its
+    /// own matrix, so a wrong `T(P_i)` shows there with the guarantees of [`PatternSet::new`].
+    pub fn builtin(int8: AmxInt8, r: usize, layout: u64) -> Option<Self> {
+        let set = Self::build(int8, r, BUILTIN_SEED, layout);
+        (set.checksum.0 == BUILTIN_CHECKSUM).then_some(set)
+    }
+}
+
+/// The startup check: the built-in set, recomputed on the tiles and compared with its stored
+/// checksum. False means the matrix unit is wrong before the test starts.
+pub fn self_test(int8: AmxInt8) -> bool {
+    PatternSet::<16>::builtin(int8, 0, 0).is_some()
+}
+
+/// One differing word of a tile, by its index in the tile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BadWord {
+    pub word: usize,
+    pub expected: u64,
+    pub actual: u64,
+}
+
+/// What a tile's differences look like.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Signature {
+    /// One bit of the stored result: byte `byte` of the tile (0..1024), bit `bit`.
+    Stored { byte: usize, bit: u32 },
+    /// One bit of the pattern, flipped before RW read it: byte `byte` of the pattern tile, bit
+    /// `bit`, and whether it went from 0 to 1. One row of the result is off by `d * K[j][..]`,
+    /// which names the byte (the transform's rows are distinct).
+    BeforeTransform { byte: usize, bit: u32, rose: bool },
+    /// Anything else: more than one bit, or neither shape.
+    Other,
+}
+
+/// A bad tile the rescan found.
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "diagnostic fields for the reporting this prototype doesn't build yet"
-)]
 pub struct TileError {
-    pub group: usize,
-    /// Tile position within the group.
+    /// Its position in the group.
     pub tile: usize,
-    /// Which pattern that tile should have held.
+    /// The pattern it should hold.
     pub pattern: usize,
-    /// `(row, col, expected, actual)` for every differing dword of the 16x16 result.
-    pub diffs: Vec<(usize, usize, u32, u32)>,
-    /// Set when every difference lies in one output row and matches one flipped input bit
-    /// propagated through the transform matrix: `(byte, bit, sign)`. That signature means the
-    /// error was in the pattern *before* the transform (RW read a wrong byte from `A`), not in
-    /// the stored result. `None` either means the corruption was in the stored result directly
-    /// (the common case: an isolated byte or few bytes differ, not a whole row), or that more
-    /// than one bit's worth of corruption happened.
-    pub before_transform: Option<(usize, u32, i64)>,
+    /// Every differing word, by volatile loads.
+    pub words: Vec<BadWord>,
+    pub signature: Signature,
 }
 
-/// Compares one tile's actual, stored value against its expected `T(pattern)` and reports every
-/// differing dword, with the before/after-transform classification the design doc describes.
-fn diagnose_tile(
-    group: usize,
-    tile: usize,
-    pattern: usize,
-    actual: &Tile,
-    expected: &Tile,
-    transform: &Matrix,
-) -> TileError {
-    let (a, e) = (tile_to_grid(actual), tile_to_grid(expected));
-    let mut diffs = Vec::new();
-    for (m, (ar, er)) in a.iter().zip(&e).enumerate() {
-        for (n, (&av, &ev)) in ar.iter().zip(er).enumerate() {
-            if av != ev {
-                diffs.push((m, n, ev, av));
-            }
-        }
-    }
-    let before_transform = classify_before_transform(&a, &e, transform);
-    TileError {
-        group,
-        tile,
-        pattern,
-        diffs,
-        before_transform,
+/// TMR's rereads of one bad word: [`REREADS`] volatile loads, one after flushing its line, and
+/// one through a tile load after flushing it again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Reread {
+    pub tile: usize,
+    pub word: usize,
+    pub expected: u64,
+    /// How many of the [`REREADS`] rereads were still wrong.
+    pub still_wrong: u32,
+    pub after_flush: u64,
+    pub via_tiles: u64,
+}
+
+/// Tier 2's report on a group whose checksum disagreed. As TMR's, none of the rereads locates
+/// the fault: a reread can hit a cached copy of a bad read, and a flush writes back a dirty line
+/// first. They're reported as seen.
+#[derive(Debug)]
+pub struct GroupError {
+    pub group: usize,
+    /// The bad tiles. Empty: the rescan found every word right, the check is not reproduced.
+    pub tiles: Vec<TileError>,
+    /// The first [`REREAD_WORDS`] bad words, reread.
+    pub rereads: Vec<Reread>,
+    /// Whether the checksum still disagrees when it's recomputed through the tiles after the
+    /// rescan. With nothing reproduced, true means the tile path sees what word loads don't: a
+    /// fault in the tile loads or the multiply.
+    pub tile_recheck: bool,
+}
+
+impl GroupError {
+    pub fn reproduced(&self) -> bool {
+        !self.tiles.is_empty()
     }
 }
 
-/// If every differing dword lies in one row `m` of the 16x16 result, tries every byte `j` < 64
-/// and signed power-of-two `d` (a single flipped bit) to see whether the whole row's delta
-/// matches `d * transform[j][*]` exactly: that's the signature a flipped input bit leaves after
-/// propagating through the transform matrix. 64 bytes x 8 bits x 2 signs = 1024 candidates,
-/// each checked against the row's 16 entries: cheap, and only runs on a tier-2 mismatch.
-fn classify_before_transform(
-    a: &[[u32; 16]; 16],
-    e: &[[u32; 16]; 16],
-    transform: &Matrix,
-) -> Option<(usize, u32, i64)> {
-    let mut rows = (0..16).filter(|&m| (0..16).any(|n| a[m][n] != e[m][n]));
-    let m = rows.next()?;
-    if rows.next().is_some() {
-        return None; // more than one row differs: not a single propagated bit
-    }
-    for j in 0..64 {
-        for bit in 0..8u32 {
-            for sign in [1i64, -1i64] {
-                let d = sign * (1i64 << bit);
-                let matches = (0..16).all(|n| {
-                    let delta = a[m][n].wrapping_sub(e[m][n]);
-                    let want = (d.wrapping_mul(transform.get(j, n) as i64) as i32) as u32;
-                    delta == want
-                });
-                if matches {
-                    return Some((j, bit, sign));
-                }
-            }
+/// The shape of `words` (one tile's differences, in word order) against the transform `k`.
+fn signature(words: &[BadWord], k: &Matrix) -> Signature {
+    if let [w] = words {
+        let x = w.expected ^ w.actual;
+        if x.count_ones() == 1 {
+            let b = x.trailing_zeros() as usize;
+            return Signature::Stored {
+                byte: w.word * 8 + b / 8,
+                bit: (b % 8) as u32,
+            };
         }
     }
-    None
-}
-
-/// W and RW for one group (`group.len() == set.group_words()`): fills it with the pattern set,
-/// rotated for group `g` and `pass`, then transforms every tile in place. `inject`, if not a
-/// no-op, runs on the freshly-filled patterns between W and RW, so a test can corrupt a
-/// pattern "before the transform" rather than the stored result after it ([`fill`] always
-/// passes a no-op; [`pass_inject`] below is the test-only hook).
-///
-/// The RW session captures a raw pointer into `group`, not a `&mut [u64]`: plumb_tiles' calling
-/// practices (crate docs) want captures by value, which a `Copy` pointer gives for free (a
-/// `move` closure over a `Copy` local, including a slice reference re-derived each call, needs
-/// care — see `amx_multiply`'s comment for the sharper version of this trap). One session for
-/// the whole group, not per tile, keeps the `LDTILECFG`/`TILERELEASE` overhead down (as
-/// `tiles.rs`'s `k_amx_mirror` also does).
-fn fill_group(
-    int8: AmxInt8,
-    set: &PatternSet,
-    group: &mut [u64],
-    g: usize,
-    pass: usize,
-    inject: &mut dyn FnMut(&mut [u64]),
-) {
-    let indices: Vec<usize> = (0..set.x)
-        .map(|t| pattern_index(set.x, g, pass, t))
-        .collect();
-    let tile_count = group.len() / TILE_U64;
-
-    // W: fill, rotated.
-    let (tiles, _) = group.as_chunks_mut::<TILE_U64>();
-    for (tile, &pi) in tiles.iter_mut().zip(&indices) {
-        tile.copy_from_slice(&set.patterns[pi].0);
+    // A flip in byte `j` of pattern row `m` moves all 16 entries of result row `m` (8 words) by
+    // `d * k[j][n]`, `d = +-2^b`; every entry of `k` is odd, so all 16 move, by `2^b` times an
+    // odd byte.
+    let row = words[0].word / 8;
+    if words.len() != 8 || words.iter().any(|w| w.word / 8 != row) {
+        return Signature::Other;
     }
-    inject(group);
-
-    // RW: transform each tile in place.
-    let transform = set.transform.0;
-    let p = group.as_mut_ptr();
-    int8.with_tiles(move |t| {
-        for i in 0..tile_count {
-            // SAFETY: tile i (i < tile_count) lies inside `group`, which nothing else touches
-            // for the duration of this session.
-            let tile = unsafe { std::slice::from_raw_parts_mut(p.add(i * TILE_U64), TILE_U64) };
-            t.load_u64::<T4>(tile, ROW_BYTES);
-            t.load_u64::<T5>(&transform, ROW_BYTES);
-            t.zero::<T0>();
-            t.dpbuud::<T0, T4, T5>(int8);
-            t.store_u64::<T0>(tile, ROW_BYTES);
-        }
+    let delta: [i32; 16] = std::array::from_fn(|n| {
+        let (w, shift) = (&words[n / 2], n % 2 * 32);
+        ((w.actual >> shift) as u32).wrapping_sub((w.expected >> shift) as u32) as i32
     });
+    let bit = delta[0].trailing_zeros();
+    if bit > 7 {
+        return Signature::Other;
+    }
+    let d = if delta[0] < 0 { -(1 << bit) } else { 1 << bit };
+    let col = delta.map(|x| x / d);
+    let odd_bytes = col.iter().all(|&c| (1..=255).contains(&c) && c % 2 == 1);
+    if !odd_bytes || delta.iter().zip(&col).any(|(&x, &c)| x != c * d) {
+        return Signature::Other;
+    }
+    match (0..64).find(|&j| (0..16).all(|n| i32::from(k.get(j, n)) == col[n])) {
+        Some(j) => Signature::BeforeTransform {
+            byte: row * ROW_BYTES + j,
+            bit,
+            rose: d > 0,
+        },
+        None => Signature::Other,
+    }
 }
 
-/// R and tier 2 for one already-filled group: checks `set.checks()` independent checksums
-/// against what a clean group holding `g`/`pass`'s rotation should show (tier 1), and on a
-/// mismatch, an exact compare of every tile against its expected value (tier 2), reported
-/// through `on_error`. Doesn't touch W or RW, so it sees whatever is actually in `group` —
-/// including corruption that happened after a previous [`fill_group`] wrote it. Returns
-/// whether the group's checksums disagreed.
-fn verify_group(
-    int8: AmxInt8,
-    set: &PatternSet,
-    group: &[u64],
-    g: usize,
-    pass: usize,
-    on_error: &mut dyn FnMut(TileError),
-) -> bool {
-    let indices: Vec<usize> = (0..set.x)
-        .map(|t| pattern_index(set.x, g, pass, t))
-        .collect();
-
-    let mut bad = false;
-    let p: *const u64 = group.as_ptr();
-    for c in 0..set.checks {
-        let keys: Vec<Matrix> = indices.iter().map(|&pi| set.checksum_keys[c][pi]).collect();
-        let mut sum = [0u64; TILE_U64];
-        // See `amx_multiply`'s comment: move a reference to `sum`, not `sum` itself (`Copy`).
-        let sum_ref = &mut sum;
-        int8.with_tiles(move |t| {
-            t.zero::<T0>();
-            for (i, key) in keys.iter().enumerate() {
-                // SAFETY: tile i (i < tile_count == keys.len()) lies inside `group`, read-only
-                // here.
-                let tile = unsafe { std::slice::from_raw_parts(p.add(i * TILE_U64), TILE_U64) };
-                t.load_u64::<T4>(tile, ROW_BYTES);
-                t.load_u64::<T5>(&key.0, ROW_BYTES);
-                t.dpbuud::<T0, T4, T5>(int8);
-            }
-            t.store_u64::<T0>(sum_ref, ROW_BYTES);
-        });
-        if sum != set.expected_checksum[c].0 {
-            bad = true;
-        }
-    }
-    if !bad {
-        return false;
-    }
-
-    // Tier 2: which tile(s), exactly.
-    let (tiles, _) = group.as_chunks::<TILE_U64>();
-    for (ti, (tile, &pi)) in tiles.iter().zip(&indices).enumerate() {
-        let actual = Tile(*tile);
-        if actual != set.expected_t[pi] {
-            on_error(diagnose_tile(
-                g,
-                ti,
-                pi,
-                &actual,
-                &set.expected_t[pi],
-                &set.transform,
-            ));
-        }
-    }
-    true
-}
-
-/// W and RW over the whole of `buf`, a whole number of `set.group_words()`-sized groups: fills
-/// every group with the pattern set (rotated per `pass`) and transforms each tile in place.
-/// Pairs with [`verify`], as a separate step, so something can happen to the memory in between
-/// (the sleep a real deployment would add between TM5-style write and verify phases; a test
-/// corrupting the stored result directly).
-pub fn fill(int8: AmxInt8, set: &PatternSet, buf: &mut [u64], pass: usize) {
-    let group_words = set.group_words();
+/// Panics unless `buf` is a whole number of `X`-tile groups.
+fn check_groups<const X: usize>(buf: &[u64]) {
     assert!(
-        buf.len().is_multiple_of(group_words),
+        buf.len().is_multiple_of(PatternSet::<X>::group_words()),
         "buf must be a whole number of groups"
     );
-    for (g, group) in buf.chunks_mut(group_words).enumerate() {
-        fill_group(int8, set, group, g, pass, &mut |_| {});
-    }
 }
 
-/// R and tier 2 over the whole of `buf`: checks every group's checksums against what [`fill`]
-/// with the same `pass` should have left there, running tier 2 on any mismatch. Returns the
-/// number of groups with at least one wrong checksum.
-pub fn verify(
+/// **W**: stores each tile's pattern, rotated for its group and `pass` (TM5's write phase).
+pub fn write<const X: usize>(int8: AmxInt8, set: &PatternSet<X>, buf: &mut [u64], pass: usize) {
+    check_groups::<X>(buf);
+    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `write_tiles` enables.
+    unsafe { write_tiles(int8, set, buf, pass) }
+}
+
+/// **RW**: transforms every tile in place, `T(P) = P x K`. Any whole number of tiles.
+pub fn transform<const X: usize>(int8: AmxInt8, set: &PatternSet<X>, buf: &mut [u64]) {
+    assert!(
+        buf.len().is_multiple_of(TILE_U64),
+        "buf must be whole tiles"
+    );
+    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `transform_tiles` enables.
+    unsafe { transform_tiles(int8, &set.transform, buf) }
+}
+
+/// **R** and tier 2: checks every group's checksum against what [`write`] and [`transform`] with
+/// the same `pass` leave there, and rescans each group that disagrees as soon as it's found,
+/// before the pass reads on. Returns one [`GroupError`] per such group, in buffer order; empty
+/// when the buffer is clean.
+pub fn verify<const X: usize>(
     int8: AmxInt8,
-    set: &PatternSet,
+    set: &PatternSet<X>,
     buf: &[u64],
     pass: usize,
-    on_error: &mut dyn FnMut(TileError),
-) -> u64 {
-    let group_words = set.group_words();
-    assert!(
-        buf.len().is_multiple_of(group_words),
-        "buf must be a whole number of groups"
-    );
-    let mut bad_groups = 0u64;
-    for (g, group) in buf.chunks(group_words).enumerate() {
-        if verify_group(int8, set, group, g, pass, on_error) {
-            bad_groups += 1;
-        }
+) -> Vec<GroupError> {
+    check_groups::<X>(buf);
+    let mut errors = Vec::new();
+    let mut sums = [[0; TILE_U64]; 2];
+    let groups = buf.as_chunks::<TILE_U64>().0.as_chunks::<X>().0;
+    let mut from = 0;
+    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `verify_tiles` and `rescan`
+    // enable.
+    while let Some(g) = unsafe { verify_tiles::<X>(int8, set, buf, pass, from, &mut sums) } {
+        let off = rotation::<X>(set.layout, g, pass);
+        errors.push(unsafe { rescan::<X>(int8, set, &groups[g], g, off, &mut sums) });
+        from = g + 1;
     }
-    bad_groups
+    errors
 }
 
-/// [`fill`] then [`verify`], immediately: convenient where nothing happens in between.
-pub fn pass(
+/// [`write`], [`transform`] and [`verify`], one after the other.
+pub fn pass<const X: usize>(
     int8: AmxInt8,
-    set: &PatternSet,
+    set: &PatternSet<X>,
     buf: &mut [u64],
     pass: usize,
-    on_error: &mut dyn FnMut(TileError),
-) -> u64 {
-    fill(int8, set, buf, pass);
-    verify(int8, set, buf, pass, on_error)
+) -> Vec<GroupError> {
+    write(int8, set, buf, pass);
+    transform(int8, set, buf);
+    verify(int8, set, buf, pass)
 }
 
-/// Test-only: as [`fill`], but on exactly one group, with `inject` run on the freshly-filled
-/// patterns before RW reads them — a hook for fault injection "before the transform" that
-/// [`fill`]'s public signature has no room for. Follow with [`verify`] (on the same one-group
-/// buffer, same `pass`) to run tier 1/2 against it.
-#[cfg(test)]
-pub fn fill_inject(
+// The kernels. Each runs its phase over the buffer in one session, from a function compiled
+// with the AMX features (plumb_tiles' calling practice 2), and gives its tile loop its own
+// function (TMR's Rule 6.1).
+
+#[inline(never)]
+#[target_feature(enable = "amx-tile,amx-int8")]
+unsafe fn write_tiles<const X: usize>(
     int8: AmxInt8,
-    set: &PatternSet,
-    group: &mut [u64],
+    set: &PatternSet<X>,
+    buf: &mut [u64],
     pass: usize,
-    inject: &mut dyn FnMut(&mut [u64]),
 ) {
-    assert_eq!(
-        group.len(),
-        set.group_words(),
-        "fill_inject takes exactly one group"
-    );
-    fill_group(int8, set, group, 0, pass, inject);
+    int8.with_tiles(|t| {
+        let (tiles, _) = buf.as_chunks_mut::<TILE_U64>();
+        for (g, group) in tiles.as_chunks_mut::<X>().0.iter_mut().enumerate() {
+            let off = rotation::<X>(set.layout, g, pass);
+            let (pairs, _) = group.as_chunks_mut::<2>();
+            for (i, pair) in pairs.iter_mut().enumerate() {
+                t.load_u64::<T0>(&set.patterns[(2 * i + off) & (X - 1)].0, ROW_BYTES);
+                t.load_u64::<T1>(&set.patterns[(2 * i + 1 + off) & (X - 1)].0, ROW_BYTES);
+                t.store_u64::<T0>(&mut pair[0], ROW_BYTES);
+                t.store_u64::<T1>(&mut pair[1], ROW_BYTES);
+            }
+        }
+    })
 }
+
+/// The transform matrix stays in T7 for the session; tiles go two at a time (T4, T5 into T0,
+/// T1).
+#[inline(never)]
+#[target_feature(enable = "amx-tile,amx-int8")]
+unsafe fn transform_tiles(int8: AmxInt8, k: &Matrix, buf: &mut [u64]) {
+    int8.with_tiles(|t| {
+        t.load_u64::<T7>(&k.0, ROW_BYTES);
+        let (tiles, _) = buf.as_chunks_mut::<TILE_U64>();
+        let (pairs, odd) = tiles.as_chunks_mut::<2>();
+        for pair in pairs {
+            t.load_u64::<T4>(&pair[0], ROW_BYTES);
+            t.load_u64::<T5>(&pair[1], ROW_BYTES);
+            t.zero::<T0>();
+            t.zero::<T1>();
+            t.dpbuud::<T0, T4, T7>(int8);
+            t.dpbuud::<T1, T5, T7>(int8);
+            t.store_u64::<T0>(&mut pair[0], ROW_BYTES);
+            t.store_u64::<T1>(&mut pair[1], ROW_BYTES);
+        }
+        for tile in odd {
+            t.load_u64::<T4>(tile, ROW_BYTES);
+            t.zero::<T0>();
+            t.dpbuud::<T0, T4, T7>(int8);
+            t.store_u64::<T0>(tile, ROW_BYTES);
+        }
+    })
+}
+
+/// The R pass's kernel from group `from`: each group's checksum, compared with the expected
+/// one. Stops at the first group that disagrees and returns its index. `sums` is scratch.
+#[inline(never)]
+#[target_feature(enable = "amx-tile,amx-int8")]
+unsafe fn verify_tiles<const X: usize>(
+    int8: AmxInt8,
+    set: &PatternSet<X>,
+    buf: &[u64],
+    pass: usize,
+    from: usize,
+    sums: &mut [[u64; TILE_U64]; 2],
+) -> Option<usize> {
+    int8.with_tiles(|t| {
+        let (tiles, _) = buf.as_chunks::<TILE_U64>();
+        for (i, group) in tiles.as_chunks::<X>().0[from..].iter().enumerate() {
+            let g = from + i;
+            let off = rotation::<X>(set.layout, g, pass);
+            group_sums::<X>(t, int8, &set.keys, group, off, set.r, sums);
+            if !sums_match(sums, &set.expected_sum) {
+                return Some(g);
+            }
+        }
+        None
+    })
+}
+
+/// The R pass's loop: `group`'s checksum, as two chains in `sums` that add up to it. Tiles go in
+/// pairs, each tile with its own registers (data T4 and matrix T5 into T0; T6 and T7 into T1),
+/// so the two chains of multiplies don't wait on each other; each tile's product goes into its
+/// chain `1 + r` times.
+#[inline(always)]
+fn group_sums<const X: usize>(
+    t: &mut Tiles<'_>,
+    int8: AmxInt8,
+    keys: &[Matrix; X],
+    group: &[[u64; TILE_U64]; X],
+    off: usize,
+    r: usize,
+    sums: &mut [[u64; TILE_U64]; 2],
+) {
+    t.zero::<T0>();
+    t.zero::<T1>();
+    for (i, pair) in group.as_chunks::<2>().0.iter().enumerate() {
+        t.load_u64::<T4>(&pair[0], ROW_BYTES);
+        t.load_u64::<T5>(&keys[(2 * i + off) & (X - 1)].0, ROW_BYTES);
+        t.load_u64::<T6>(&pair[1], ROW_BYTES);
+        t.load_u64::<T7>(&keys[(2 * i + 1 + off) & (X - 1)].0, ROW_BYTES);
+        t.dpbuud::<T0, T4, T5>(int8);
+        t.dpbuud::<T1, T6, T7>(int8);
+        for _ in 0..r {
+            t.dpbuud::<T0, T4, T5>(int8);
+            t.dpbuud::<T1, T6, T7>(int8);
+        }
+    }
+    t.store_u64::<T0>(&mut sums[0], ROW_BYTES);
+    t.store_u64::<T1>(&mut sums[1], ROW_BYTES);
+}
+
+/// Two words of u32 lanes added lane by lane, each lane wrapping on its own (as the multiply's
+/// accumulator does).
+#[inline(always)]
+fn add_lanes(a: u64, b: u64) -> u64 {
+    let lo = (a as u32).wrapping_add(b as u32);
+    let hi = ((a >> 32) as u32).wrapping_add((b >> 32) as u32);
+    u64::from(lo) | (u64::from(hi) << 32)
+}
+
+/// Whether the two chains add up to `expected`.
+#[inline(always)]
+fn sums_match(sums: &[[u64; TILE_U64]; 2], expected: &Tile) -> bool {
+    let diff = sums[0]
+        .iter()
+        .zip(&sums[1])
+        .zip(&expected.0)
+        .fold(0, |acc, ((a, b), e)| acc | (add_lanes(*a, *b) ^ e));
+    diff == 0
+}
+
+/// Tier 2 for group `g`: the rescan against `T(P_i)` with volatile loads, then in one session
+/// the rereads and the checksum again through the tiles. `sums` is scratch.
+#[cold]
+#[inline(never)]
+#[target_feature(enable = "amx-tile,amx-int8")]
+unsafe fn rescan<const X: usize>(
+    int8: AmxInt8,
+    set: &PatternSet<X>,
+    group: &[[u64; TILE_U64]; X],
+    g: usize,
+    off: usize,
+    sums: &mut [[u64; TILE_U64]; 2],
+) -> GroupError {
+    let mut tiles = Vec::new();
+    for (i, tile) in group.iter().enumerate() {
+        let pattern = (i + off) & (X - 1);
+        let words: Vec<BadWord> = set.expected_t[pattern]
+            .0
+            .iter()
+            .zip(tile)
+            .enumerate()
+            .filter_map(|(word, (&expected, actual))| {
+                let actual = read_volatile(actual);
+                (actual != expected).then_some(BadWord {
+                    word,
+                    expected,
+                    actual,
+                })
+            })
+            .collect();
+        if !words.is_empty() {
+            tiles.push(TileError {
+                tile: i,
+                pattern,
+                signature: signature(&words, &set.transform),
+                words,
+            });
+        }
+    }
+    let (rereads, tile_recheck) = int8.with_tiles(|t| {
+        let rereads = reread(t, group, &tiles, &mut sums[0]);
+        group_sums::<X>(t, int8, &set.keys, group, off, set.r, sums);
+        (rereads, !sums_match(sums, &set.expected_sum))
+    });
+    GroupError {
+        group: g,
+        tiles,
+        rereads,
+        tile_recheck,
+    }
+}
+
+/// TMR's rereads (`Rescan::reread`) of the first [`REREAD_WORDS`] bad words, plus one through
+/// the tiles: every word's volatile rereads before any flush, since a flush evicts the whole
+/// line; then each reread after flushing the lines; then each line flushed again and its tile
+/// loaded (stored to `scratch` to read the word).
+unsafe fn reread(
+    t: &mut Tiles<'_>,
+    group: &[[u64; TILE_U64]],
+    tiles: &[TileError],
+    scratch: &mut [u64; TILE_U64],
+) -> Vec<Reread> {
+    let suspects: Vec<(usize, BadWord)> = tiles
+        .iter()
+        .flat_map(|e| e.words.iter().map(|&w| (e.tile, w)))
+        .take(REREAD_WORDS)
+        .collect();
+    let at = |tile: usize, w: &BadWord| &raw const group[tile][w.word];
+    let still: Vec<u32> = suspects
+        .iter()
+        .map(|(tile, w)| {
+            (0..REREADS)
+                .map(|_| u32::from(read_volatile(at(*tile, w)) != w.expected))
+                .sum()
+        })
+        .collect();
+    for (tile, w) in &suspects {
+        _mm_clflush(at(*tile, w).cast());
+    }
+    _mm_mfence();
+    let after: Vec<u64> = suspects
+        .iter()
+        .map(|(tile, w)| read_volatile(at(*tile, w)))
+        .collect();
+    let mut out = Vec::with_capacity(suspects.len());
+    for (((tile, w), still_wrong), after_flush) in suspects.iter().zip(still).zip(after) {
+        _mm_clflush(at(*tile, w).cast());
+        _mm_mfence();
+        t.load_u64::<T6>(&group[*tile], ROW_BYTES);
+        t.store_u64::<T6>(scratch, ROW_BYTES);
+        out.push(Reread {
+            tile: *tile,
+            word: w.word,
+            expected: w.expected,
+            still_wrong,
+            after_flush,
+            via_tiles: scratch[w.word],
+        });
+    }
+    out
+}
+
+/// The checksum, at `r`, of a group holding `T(P_i)` at tile `i` (rotation 0).
+#[target_feature(enable = "amx-tile,amx-int8")]
+unsafe fn group_checksum<const X: usize>(
+    int8: AmxInt8,
+    keys: &[Matrix; X],
+    group: &[u64],
+    r: usize,
+) -> Tile {
+    let mut sums = [[0; TILE_U64]; 2];
+    let group = group
+        .as_chunks::<TILE_U64>()
+        .0
+        .try_into()
+        .expect("one group");
+    int8.with_tiles(|t| group_sums::<X>(t, int8, keys, group, 0, r, &mut sums));
+    Tile(std::array::from_fn(|w| add_lanes(sums[0][w], sums[1][w])))
+}
+
+/// Test-only: tier 2 on group `g` of `buf`, as if its checksum had disagreed.
+#[cfg(test)]
+pub fn rescan_group<const X: usize>(
+    int8: AmxInt8,
+    set: &PatternSet<X>,
+    buf: &[u64],
+    g: usize,
+    pass: usize,
+) -> GroupError {
+    check_groups::<X>(buf);
+    let mut sums = [[0; TILE_U64]; 2];
+    let group = &buf.as_chunks::<TILE_U64>().0.as_chunks::<X>().0[g];
+    let off = rotation::<X>(set.layout, g, pass);
+    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `rescan` enables.
+    unsafe { rescan::<X>(int8, set, group, g, off, &mut sums) }
+}
+
+/// The set's internals, for `tests_xform.rs`'s independent computation.
+#[cfg(test)]
+impl<const X: usize> PatternSet<X> {
+    pub fn pattern(&self, i: usize) -> &Tile {
+        &self.patterns[i]
+    }
+
+    pub fn transform_matrix(&self) -> &Matrix {
+        &self.transform
+    }
+
+    /// Pattern `i`'s checksum matrix.
+    pub fn key(&self, i: usize) -> &Matrix {
+        &self.keys[i]
+    }
+
+    /// `T(pattern i)`.
+    pub fn expected(&self, i: usize) -> &Tile {
+        &self.expected_t[i]
+    }
+
+    /// The group checksum at `r` = 0.
+    pub fn checksum(&self) -> &Tile {
+        &self.checksum
+    }
+
+    /// The group checksum at this set's `r`.
+    pub fn expected_sum(&self) -> &Tile {
+        &self.expected_sum
+    }
+
+    /// The rotation offset of group `g` on pass `pass`: tile `t` holds pattern
+    /// `(t + offset) % X`.
+    pub fn offset(&self, g: usize, pass: usize) -> usize {
+        rotation::<X>(self.layout, g, pass)
+    }
+}
+
+// The asm gate's entry points (`asm_check.py`, `expect/xform.json`): W and R at both group
+// sizes, and RW. R's is the kernel alone: tier 2 is the cold path a mismatch takes, outside it.
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub fn k_xform_write_16(int8: AmxInt8, set: &PatternSet<16>, buf: &mut [u64], pass: usize) {
+    write(int8, set, buf, pass)
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub fn k_xform_write_64(int8: AmxInt8, set: &PatternSet<64>, buf: &mut [u64], pass: usize) {
+    write(int8, set, buf, pass)
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub fn k_xform_transform(int8: AmxInt8, set: &PatternSet<16>, buf: &mut [u64]) {
+    transform(int8, set, buf)
+}
+
+macro_rules! verify_entry {
+    ($($name:ident, $x:literal;)*) => {$(
+        #[unsafe(no_mangle)]
+        #[inline(never)]
+        pub fn $name(
+            int8: AmxInt8,
+            set: &PatternSet<$x>,
+            buf: &[u64],
+            pass: usize,
+            sums: &mut [[u64; TILE_U64]; 2],
+        ) -> Option<usize> {
+            check_groups::<$x>(buf);
+            // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `verify_tiles` enables.
+            unsafe { verify_tiles::<$x>(int8, set, buf, pass, 0, sums) }
+        }
+    )*};
+}
+
+verify_entry!(
+    k_xform_verify_16, 16;
+    k_xform_verify_64, 64;
+);
