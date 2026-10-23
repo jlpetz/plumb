@@ -149,7 +149,9 @@ above; re-port one current kernel and check it with `hot_loop_spills.py` as well
 **Status**: Open, to think on (the owner, 2026-10-23). The load setting r adds multiplies to R
 alone: W does none and RW one per tile, so under load the matrix unit runs in bursts, one phase
 in three. The design's purpose is memory that holds up under a busy CPU, which may mean load in
-every phase.
-**Next**: measure each phase's share of a pass, then choose: r in W and RW too (into a spare
-tile, since RW's result is the stored data), the bench's `--load amx` on a neighbouring core, or
-bursts as they are.
+every phase. Measured 2026-10-23 (bench `xformw`/`xformrw`/`xformr`, DRAM, one thread): a pass at
+r = 0 is W 34%, RW 30%, R 36% of the time; at r = 8, W 26%, RW 23%, R 51%, so the matrix unit is
+busy about half the pass. The shares predict the whole pass within 1% (17.20 and 13.33 GiB/s
+against 17.09 and 13.36 measured).
+**Next**: choose: r in W and RW too (into a spare tile, since RW's result is the stored data),
+the bench's `--load amx` on a neighbouring core, or bursts as they are.
