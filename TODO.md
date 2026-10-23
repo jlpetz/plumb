@@ -95,19 +95,19 @@ data tiles in flight) is kept in RW (+5-7%) and in R from r = 6 (+6-10%; it lose
 matched chunk sizes, in DRAM it moves 9-24% more traffic than the StuckBit port with the whole
 buffer as its chunk (`sbbig`) and 9-57% more than its flushed `sb`; in 1 MiB chunks, 69-74% of
 `sbnf` (four passes per chunk to StuckBit's six).
-**Next**: decide whether it becomes a TMR TODO (the design's last step) and how TMR's chunk-size
-and flush settings apply to it.
+**Next**: it goes to TMR as TMR's TODO 102 (the owner, 2026-10-23; item 8), ready for ACE.
 
 ### 7. ACE backend
 **Status**: Waiting: no hardware; LLVM PRs open (llvm-project#208408/#208706), nothing in rustc.
 **Next**: re-check when hardware or rustc support appears; keep the shared tile layer
 ACE-shaped meanwhile.
 
-### 8. TMR integration and pilot
-**Status**: After items 1-2 and 12 (the readiness re-check after TMR's TODO 99).
-**Next**: a `src/simd/` module in TMR-APP; pilot StuckBit behind `asm_check.py` and the
-equivalence tests, then Refresh, SimpleTest, SimpleNT, MirrorMove. Updating TMR's settled
-`macro_rules!` decision is part of the pilot's close-out.
+### 8. TMR integration
+**Status**: Revised 2026-10-23: TMR won't move its kernels to fearless_simd (item 12, the owner).
+What goes to TMR is transform-verify (item 6), as TMR's TODO 102: `plumb_tiles` has no fearless
+dependency, and the owner wants the AMX test in TMR, ready for ACE (item 7). The upstream work of
+items 3-5 helps TMR's own std::simd and core::arch code directly.
+**Next**: TMR's TODO 102 (the owner's calls first: the dependency route, the name, defaults).
 
 ### 9. Deferred cache-line ops
 **Status**: Deferred (owner decision 2026-10-03). CLWB, CLZERO, CLDEMOTE, MOVDIRI, PREFETCHW:
@@ -131,19 +131,16 @@ corrected.
 **Next**: none; no TMR TODO.
 
 ### 12. Readiness re-check: can plumb replace TMR-APP's loops after TMR's TODO 99?
-**Status**: Open, raised 2026-10-22 (the owner). TMR's TODO 99 rewrote its hot loops to Rule 6
-(6.1-6.19, `TMR-APP/doc/simd_codegen_rules.md`) and added `tools/hot_loop_spills.py` and
-`tools/bench_ab.py`. That leaves most of plumb's TMR evidence stale. The ±2% parity was measured
-against kernels from before TODO 99, four of the six macros it copied are gone, and the
-StuckBit, Refresh and SimpleNT ports here are pre-99 copies. On paper, fearless_simd 1.0 lacks a
-vector OR-reduce and two-input permutes, and on AVX2 its 64-bit vector multiply runs as four
-scalar multiplies. TODO 99 found that a change of loop shape costs 3% to 2x. So the likely answer
-is "as fast only in today's loop shapes, in a different vocabulary".
-**Next**: after TMR's TODO 100 baseline (TMR's TODO 84 holds the owner's terms): list what
-TODO 97/99's kernels need that fearless_simd and plumb don't express, and confirm the three gaps
-above; re-port one current kernel and check it with `hot_loop_spills.py` as well as
-`asm_check.py`, which has no gpr round-trip, indexed or constant-reload columns; A/B it with
-`bench_ab.py` on Intel and AMD. Item 8's pilot plan follows from the result.
+**Status**: Done 2026-10-23: no port (the owner). A compile-only assessment of every TMR kernel
+family (74 agents; 30 gap claims, each checked by two reviewers, one with probe crates) found
+fearless_simd 1.0 still in the ballpark: its ports compiled to TMR's post-99 hot loops instruction
+for instruction or within a couple of instructions. But only in TMR's own loop shapes, so a port
+would change the vocabulary, not shorten the kernels. It would also add costs: the Avx512 level
+needs the full Ice Lake set (TMR's 512-bit tests need F/BW/CD/DQ/VL), it reshapes code TMR keeps at
+256 bits or scalar (gathers, scatters, zmm copies), several traps compile silently, and every kernel
+would need rebaselining on Intel and AMD. Report: `fearlessD/FINDINGS-post99.md`; TMR closed its
+TODO 84 on it.
+**Next**: none.
 
 ### 13. Transform-verify: the matrix unit is busy in R only
 **Status**: Open, to think on (the owner, 2026-10-23). The load setting r adds multiplies to R
