@@ -115,7 +115,8 @@ fn usage() -> ! {
         "usage: plumb-bench [--quick] [--regime l2|dram|both] [--only ids] [--threads 1,2,4,6,8]\n\
          \x20      [--per-thread-mib 2048] [--pages huge|large|small] [--samples 5] [--cpu 2]\n\
          \x20      [--csv results.csv] [--load sse2|avx2|avx512|amx] [--load-duty on_us:off_us]\n\
-         group ids: fill verify4 posw posv lcgw flush sbnf amxmirror xform xformw xformrw xformr; DRAM only: ntw\n\
+         group ids: fill verify4 posw posv lcgw flush sbnf amxmirror sbbig xform xformc xformw\n\
+         \x20 xformrw xformr; DRAM only: ntw\n\
          \x20 wflush pfv copy fillflush sb refresh refreshx refreshnf simplent"
     );
     std::process::exit(2)
@@ -231,6 +232,19 @@ fn xform_run<const X: usize>(
     set: xform::PatternSet<X>,
 ) -> impl Fn(&mut [u64]) -> u64 + Send + Sync {
     move |b: &mut [u64]| xform::pass(int8, &set, b, 0, &mut xform::Rescans::default()).len() as u64
+}
+/// Transform-verify pass by pass on each chunk of `chunk` words in turn, as TMR runs a test.
+fn xform_chunked<const X: usize>(
+    int8: plumb_tiles::AmxInt8,
+    set: xform::PatternSet<X>,
+    chunk: usize,
+) -> impl Fn(&mut [u64]) -> u64 + Send + Sync {
+    move |b: &mut [u64]| {
+        let mut rescans = xform::Rescans::default();
+        b.chunks_mut(chunk)
+            .map(|c| xform::pass(int8, &set, c, 0, &mut rescans).len() as u64)
+            .sum()
+    }
 }
 /// Transform-verify's R alone with `set`, on a buffer W and RW prepared.
 fn xform_verify<const X: usize>(
@@ -836,6 +850,19 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         t,
         6.0,
     ));
+    // StuckBit with the whole per-thread buffer as its chunk (TMR's chunk size is a setting):
+    // each phase streams it, against `sbnf`'s 1 MiB chunks, which stay in L2.
+    let mut vs = vec![v!("tmr_256", tmrport::k_sbbig_tmr_256)];
+    push_if(&mut vs, tmr512, v!("tmr_512", tmrport::k_sbbig_tmr_512));
+    gs.push(Group {
+        id: "sbbig",
+        title: "TMR StuckBit port, no flush, the whole buffer as one chunk (3 phases)",
+        setup: None,
+        prime: if dram { Prime::Flush } else { Prime::None },
+        expect_zero: true,
+        bytes_mult: 6.0,
+        variants: vs,
+    });
     // Transform-verify (xform.rs, TODO 6) under the AMX load it makes itself: the built-in set
     // (X = 16) at load settings r = 0, 1, 4 and 8, and X = 64 at r = 0. Each pass writes (W),
     // reads and writes (RW) and reads (R) the buffer: 4 bytes of traffic per byte, against
@@ -857,6 +884,19 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
                     v!("x16_r4", xform_run(int8, x16(4))),
                     v!("x16_r8", xform_run(int8, x16(8))),
                     v!("x64_r0", xform_run(int8, x64)),
+                ],
+            });
+            // A pass per 1 MiB chunk, the StuckBit port's chunk (`sbnf`): mostly in L2.
+            gs.push(Group {
+                id: "xformc",
+                title: "Transform-verify per 1 MiB chunk (the StuckBit port's), X = 16 at r = 0 and 8",
+                setup: None,
+                prime: if dram { Prime::Flush } else { Prime::None },
+                expect_zero: true,
+                bytes_mult: 4.0,
+                variants: vec![
+                    v!("x16_r0", xform_chunked(int8, x16(0), tmrport::CHUNK_U64)),
+                    v!("x16_r8", xform_chunked(int8, x16(8), tmrport::CHUNK_U64)),
                 ],
             });
             // Each phase alone, to see which sets the pace: W (1 byte of traffic per byte), RW
@@ -888,7 +928,7 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
             });
             gs.push(Group {
                 id: "xformr",
-                title: "Transform-verify's R alone, X = 16 at r = 0 and 8",
+                title: "Transform-verify's R alone, X = 16 at r = 0, 1, 4 and 8",
                 setup: Some(Box::new(move |b: &mut [u64]| {
                     xform::write(int8, &prep, b, 0);
                     xform::transform(int8, &prep, b);
@@ -899,6 +939,8 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
                 bytes_mult: 1.0,
                 variants: vec![
                     v!("x16_r0", xform_verify(int8, x16(0))),
+                    v!("x16_r1", xform_verify(int8, x16(1))),
+                    v!("x16_r4", xform_verify(int8, x16(4))),
                     v!("x16_r8", xform_verify(int8, x16(8))),
                 ],
             });

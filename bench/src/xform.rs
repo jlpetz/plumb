@@ -34,7 +34,7 @@ use std::arch::x86_64::{_mm_clflush, _mm_mfence};
 use std::collections::HashSet;
 use std::ptr::read_volatile;
 
-use plumb_tiles::{AmxInt8, ROW_BYTES, T0, T1, T4, T5, T6, T7, TILE_BYTES, Tiles};
+use plumb_tiles::{AmxInt8, ROW_BYTES, T0, T1, T2, T3, T4, T5, T6, T7, TILE_BYTES, TileReg, Tiles};
 
 /// u64 words per tile (1 KiB).
 pub const TILE_U64: usize = TILE_BYTES / 8;
@@ -512,26 +512,42 @@ unsafe fn write_tiles<const X: usize>(
     })
 }
 
-/// The transform matrix stays in T7 for the session; tiles go two at a time (T4, T5 into T0,
-/// T1).
+/// The transform matrix stays in T7 for the session. Tiles go four at a time, double-buffered:
+/// each pair's loads (into T4, T5 or T2, T3) are issued before the pair ahead of it is
+/// multiplied (into T0, T1) and stored, so four tiles are in flight from DRAM, not two.
 #[inline(never)]
 #[target_feature(enable = "amx-tile,amx-int8")]
 unsafe fn transform_tiles(int8: AmxInt8, k: &Matrix, buf: &mut [u64]) {
     int8.with_tiles(|t| {
         t.load_u64::<T7>(&k.0, ROW_BYTES);
         let (tiles, _) = buf.as_chunks_mut::<TILE_U64>();
-        let (pairs, odd) = tiles.as_chunks_mut::<2>();
-        for pair in pairs {
-            t.load_u64::<T4>(&pair[0], ROW_BYTES);
-            t.load_u64::<T5>(&pair[1], ROW_BYTES);
+        let (quads, rest) = tiles.as_chunks_mut::<4>();
+        let n = quads.len();
+        if n > 0 {
+            t.load_u64::<T4>(&quads[0][0], ROW_BYTES);
+            t.load_u64::<T5>(&quads[0][1], ROW_BYTES);
+        }
+        for q in 0..n {
+            t.load_u64::<T2>(&quads[q][2], ROW_BYTES);
+            t.load_u64::<T3>(&quads[q][3], ROW_BYTES);
             t.zero::<T0>();
             t.zero::<T1>();
             t.dpbuud::<T0, T4, T7>(int8);
             t.dpbuud::<T1, T5, T7>(int8);
-            t.store_u64::<T0>(&mut pair[0], ROW_BYTES);
-            t.store_u64::<T1>(&mut pair[1], ROW_BYTES);
+            t.store_u64::<T0>(&mut quads[q][0], ROW_BYTES);
+            t.store_u64::<T1>(&mut quads[q][1], ROW_BYTES);
+            if q + 1 < n {
+                t.load_u64::<T4>(&quads[q + 1][0], ROW_BYTES);
+                t.load_u64::<T5>(&quads[q + 1][1], ROW_BYTES);
+            }
+            t.zero::<T0>();
+            t.zero::<T1>();
+            t.dpbuud::<T0, T2, T7>(int8);
+            t.dpbuud::<T1, T3, T7>(int8);
+            t.store_u64::<T0>(&mut quads[q][2], ROW_BYTES);
+            t.store_u64::<T1>(&mut quads[q][3], ROW_BYTES);
         }
-        for tile in odd {
+        for tile in rest {
             t.load_u64::<T4>(tile, ROW_BYTES);
             t.zero::<T0>();
             t.dpbuud::<T0, T4, T7>(int8);
@@ -566,10 +582,15 @@ unsafe fn verify_tiles<const X: usize>(
     })
 }
 
-/// The R pass's loop: `group`'s checksum, as two chains in `sums` that add up to it. Tiles go in
-/// pairs, each tile with its own registers (data T4 and matrix T5 into T0; T6 and T7 into T1),
-/// so the two chains of multiplies don't wait on each other; each tile's product goes into its
-/// chain `1 + r` times.
+/// From this load setting up, R runs [`group_sums_ahead`]; below it, [`group_sums_pairs`].
+/// Measured on the dev box (bench `xformr`, 2026-10-23, RESULTS.md): reading ahead wins 6-10% in
+/// DRAM from r = 6, ties at r = 5, and loses 4-13% from r = 0 to 4, where each tile's few
+/// multiplies leave nothing for the earlier loads to overlap with.
+const AHEAD_FROM_R: usize = 6;
+
+/// The R pass's loop: `group`'s checksum, as two chains in `sums` that add up to it. Each tile
+/// of a pair has its own matrix (T5, T7) and chain (T0, T1), so the two chains of multiplies
+/// don't wait on each other; each tile's product goes into its chain `1 + r` times.
 #[inline(always)]
 fn group_sums<const X: usize>(
     t: &mut Tiles<'_>,
@@ -582,20 +603,75 @@ fn group_sums<const X: usize>(
 ) {
     t.zero::<T0>();
     t.zero::<T1>();
+    if r >= AHEAD_FROM_R {
+        group_sums_ahead::<X>(t, int8, keys, group, off, r);
+    } else {
+        group_sums_pairs::<X>(t, int8, keys, group, off, r);
+    }
+    t.store_u64::<T0>(&mut sums[0], ROW_BYTES);
+    t.store_u64::<T1>(&mut sums[1], ROW_BYTES);
+}
+
+/// One pair at a time: its data (T4, T6) and matrices (T5, T7), then its multiplies.
+#[inline(always)]
+fn group_sums_pairs<const X: usize>(
+    t: &mut Tiles<'_>,
+    int8: AmxInt8,
+    keys: &[Matrix; X],
+    group: &[[u64; TILE_U64]; X],
+    off: usize,
+    r: usize,
+) {
     for (i, pair) in group.as_chunks::<2>().0.iter().enumerate() {
         t.load_u64::<T4>(&pair[0], ROW_BYTES);
         t.load_u64::<T5>(&keys[(2 * i + off) & (X - 1)].0, ROW_BYTES);
         t.load_u64::<T6>(&pair[1], ROW_BYTES);
         t.load_u64::<T7>(&keys[(2 * i + 1 + off) & (X - 1)].0, ROW_BYTES);
-        t.dpbuud::<T0, T4, T5>(int8);
-        t.dpbuud::<T1, T6, T7>(int8);
-        for _ in 0..r {
-            t.dpbuud::<T0, T4, T5>(int8);
-            t.dpbuud::<T1, T6, T7>(int8);
-        }
+        pair_sums::<T4, T6>(t, int8, r);
     }
-    t.store_u64::<T0>(&mut sums[0], ROW_BYTES);
-    t.store_u64::<T1>(&mut sums[1], ROW_BYTES);
+}
+
+/// Four tiles at a time, double-buffered: each pair's loads (into T4, T6 or T2, T3) are issued
+/// before the pair ahead of it is multiplied, so four tiles are in flight from DRAM, not two.
+#[inline(always)]
+fn group_sums_ahead<const X: usize>(
+    t: &mut Tiles<'_>,
+    int8: AmxInt8,
+    keys: &[Matrix; X],
+    group: &[[u64; TILE_U64]; X],
+    off: usize,
+    r: usize,
+) {
+    let key = |j: usize| &keys[(j + off) & (X - 1)].0;
+    let quads = group.as_chunks::<4>().0;
+    t.load_u64::<T4>(&quads[0][0], ROW_BYTES);
+    t.load_u64::<T6>(&quads[0][1], ROW_BYTES);
+    for (q, quad) in quads.iter().enumerate() {
+        t.load_u64::<T2>(&quad[2], ROW_BYTES);
+        t.load_u64::<T3>(&quad[3], ROW_BYTES);
+        t.load_u64::<T5>(key(4 * q), ROW_BYTES);
+        t.load_u64::<T7>(key(4 * q + 1), ROW_BYTES);
+        pair_sums::<T4, T6>(t, int8, r);
+        if let Some(next) = quads.get(q + 1) {
+            t.load_u64::<T4>(&next[0], ROW_BYTES);
+            t.load_u64::<T6>(&next[1], ROW_BYTES);
+        }
+        t.load_u64::<T5>(key(4 * q + 2), ROW_BYTES);
+        t.load_u64::<T7>(key(4 * q + 3), ROW_BYTES);
+        pair_sums::<T2, T3>(t, int8, r);
+    }
+}
+
+/// One pair's `1 + r` multiplies: data `A` by its matrix in T5 into chain T0, data `B` by T7
+/// into T1.
+#[inline(always)]
+fn pair_sums<A: TileReg, B: TileReg>(t: &mut Tiles<'_>, int8: AmxInt8, r: usize) {
+    t.dpbuud::<T0, A, T5>(int8);
+    t.dpbuud::<T1, B, T7>(int8);
+    for _ in 0..r {
+        t.dpbuud::<T0, A, T5>(int8);
+        t.dpbuud::<T1, B, T7>(int8);
+    }
 }
 
 /// A tile's 256 u32 entries (an accumulator's layout).

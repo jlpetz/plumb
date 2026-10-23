@@ -503,10 +503,10 @@ both --only amxread,amxfill,xformw,xformrw,xformr`; and two against four checksu
 no bad group.
 
 **Per phase, it streams at the box's rates except R.** W stores at fill speed. R at r = 0 reads
-at 77-82% of a plain read: the likely cause is that each pair's tile loads wait for the previous
-pair's multiplies to free its registers, so two data tiles are in flight against `amxread`'s
-four (not yet tested). The three phases' times add up to the whole pass (16.97 GiB/s predicted
-at 1T, 16.67 measured).
+at 77-82% of a plain read. Each pair's tile loads wait for the previous pair's multiplies to
+free its registers, so two data tiles are in flight against `amxread`'s four; reading ahead
+(below) helps RW, and R only at high r. The three phases' times add up to the whole pass (16.97
+GiB/s predicted at 1T, 16.67 measured).
 
 ```text
 DRAM, GiB/s           1T      4T     bytes per byte
@@ -549,4 +549,55 @@ two, 16.33 and 16.28 with four; in DRAM at one thread, r = 0 11.98 and 11.96 aga
    x16_r8        12.98         24.97         45.49         39.30         48.68
    x64_r0        17.68         33.64         58.99         45.13         54.87
    L2, one thread, 256 KiB: x16 r0 75.36, r1 67.04, r4 57.41, r8 40.14, x64 r0 58.36
+```
+
+**Reading ahead: RW always, R from r = 6.** Both loops can issue each pair's tile loads before
+the pair ahead of it is multiplied, so four data tiles are in flight, not two. For RW that's a
+clean gain: 27.0 to 28.8 GiB/s at one thread, 83.7 to 88.1 at four (three A/B rounds). For R it
+depends on the load setting. From r = 6 it wins 6-10%; at r = 5 it ties, and up to r = 4 it
+loses 4-13%. There each tile's one to five multiplies give the earlier loads too little to
+overlap with. So R picks its loop by r (`AHEAD_FROM_R`).
+
+```text
+R alone in DRAM, GiB/s at 1T / 4T (two rounds each, the builds alternating)
+        one pair at a time            reading ahead
+r = 0   11.67/42.58  11.40/42.86      10.46/38.93  10.51/39.01
+r = 1   10.30/37.78  10.09/37.44       9.73/36.39   9.83/36.45
+r = 4    7.76/29.08   7.89/28.51       6.97/26.49   7.02/26.45
+r = 5    7.11/24.01   6.83/25.87       6.70/25.52   6.69/25.45
+r = 6    6.18/23.87   6.21/23.78       6.62/25.30   6.63/25.40
+r = 8    5.99/23.05   6.02/23.17       6.60/25.30   6.61/25.61
+r = 16   4.96/19.29   4.98/19.15       5.45/21.19   5.44/21.24
+```
+
+**Against StuckBit at matched chunk sizes.** TMR's chunk size is a setting: small chunks keep a
+test in L2, and large ones (or StuckBit's flush) send each phase to DRAM. `sbbig` runs the
+StuckBit port with the whole 2 GiB buffer as its one chunk, as transform-verify's `xform` does;
+`xformc` runs transform-verify per 1 MiB chunk, as `sbnf` does. In DRAM, transform-verify moves
+9-24% more traffic than StuckBit's zmm loop (`sbbig` tmr_512) at r = 0, and about as much at
+r = 8 (96-101%). It moves 9-57% more than StuckBit with its flush (`sb`). In 1 MiB chunks it moves
+69-74% of `sbnf`'s traffic. There each chunk's first write goes to DRAM and the rest stays in
+L2: StuckBit spreads that write over six passes of the chunk, transform-verify over four (4/6 is
+67%).
+
+```text
+== sb | TMR StuckBit port, flush before verify (3 phases; 1 MiB chunks)
+   variant                 1T            2T            4T            6T            8T
+   tmr_256       11.19         21.57         40.87         38.94         50.49
+   tmr_512       10.87         20.77         39.52         38.68         49.67
+== sbbig | TMR StuckBit port, no flush, the whole buffer as one chunk (3 phases)
+   tmr_256       14.86         27.61         47.42         40.96         49.10
+   tmr_512       13.79         26.09         47.15         39.32         48.02
+== xform | Transform-verify, the whole buffer (reading ahead in RW; in R from r = 6)
+   x16_r0        17.09         32.28         57.08         42.99         54.31
+   x16_r1        16.60         31.02         54.92         42.50         53.90
+   x16_r4        15.03         27.74         48.88         41.21         51.24
+   x16_r8        13.36         24.96         46.37         38.66         48.48
+   x64_r0        17.69         33.48         58.63         43.24         53.60
+== sbnf | TMR StuckBit port, no flush (3 phases; 1 MiB chunks)
+   tmr_256       40.35         79.10        148.68        112.63        140.89
+   tmr_512       45.55         89.49        168.18        113.04        145.90
+== xformc | Transform-verify per 1 MiB chunk
+   x16_r0        33.56         65.61        121.10         79.58        100.93
+   x16_r8        24.20         48.05         88.49         63.71         82.35
 ```

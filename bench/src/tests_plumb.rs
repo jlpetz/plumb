@@ -386,7 +386,9 @@ fn ported_tests_agree_and_catch_faults() {
             for flush in [true, false] {
                 // SAFETY (tmr closures): aligned whole buffers, n a multiple of the lanes; features checked.
                 check_port(&format!("sb_{}_flush{flush}", $w), n, 3, 1, &sb,
-                    &|b, f| unsafe { tmrport::$sb(b.as_mut_ptr(), b.len(), flush, f) },
+                    &|b, f| unsafe {
+                        tmrport::$sb(b.as_mut_ptr(), b.len(), flush, tmrport::CHUNK_U64, f)
+                    },
                     &|b, f| tmrport::stuckbit_pl::<$Tok, $V, _>(tok, cf, b, flush, f));
                 check_port(&format!("refresh_{}_flush{flush}", $w), n, 1, 1, &refresh,
                     &|b, f| unsafe { tmrport::$refresh(b.as_mut_ptr(), b.len(), flush, f) },

@@ -52,7 +52,8 @@ pub const VERIFY_REPS: usize = 5;
 
 macro_rules! tmr_ports {
     ($V:ty, $tf:literal, $sb:ident, $refresh:ident, $simplent:ident, $lanes:expr, $arch:ty, $stream:ident) => {
-        /// `stuck_bit_impl!` per chunk: write P1/P2/P1, fence, optional flush, 4-acc verify.
+        /// `stuck_bit_impl!` per chunk of `chunk_u64` words (TMR's chunk size is a setting):
+        /// write P1/P2/P1, fence, optional flush, 4-acc verify.
         ///
         /// # Safety
         /// `p..p+n` valid and 64-byte aligned; the CPU has the features in `$tf` and CLFLUSHOPT.
@@ -62,12 +63,13 @@ macro_rules! tmr_ports {
             p: *mut u64,
             n: usize,
             flush: bool,
+            chunk_u64: usize,
             mut inject: F,
         ) -> u64 {
             let lanes = size_of::<$V>() / 8;
             let base = p as *mut $V;
             let len = n / lanes;
-            let chunk = (CHUNK_U64 / lanes).max(1024);
+            let chunk = (chunk_u64 / lanes).max(1024);
             let mut errs = 0u64;
             let mut start = 0;
             while start < len {
@@ -503,6 +505,22 @@ pub unsafe fn refresh_tmrx_256<const FILL_PL: bool, const VERIFY: u8, F: FnMut(&
 fn none(_: &mut [u64]) {}
 
 macro_rules! tmr_entry {
+    ($name:ident, $f:ident, flush $flush:expr, chunk whole) => {
+        #[unsafe(no_mangle)]
+        #[inline(never)]
+        pub fn $name(buf: &mut [u64]) -> u64 {
+            // SAFETY: page-aligned whole buffer; the harness gates the CPU features.
+            unsafe { $f(buf.as_mut_ptr(), buf.len(), $flush, buf.len(), none) }
+        }
+    };
+    ($name:ident, $f:ident, flush $flush:expr, chunk $chunk:expr) => {
+        #[unsafe(no_mangle)]
+        #[inline(never)]
+        pub fn $name(buf: &mut [u64]) -> u64 {
+            // SAFETY: page-aligned whole buffer; the harness gates the CPU features.
+            unsafe { $f(buf.as_mut_ptr(), buf.len(), $flush, $chunk, none) }
+        }
+    };
     ($name:ident, $f:ident, flush $flush:expr) => {
         #[unsafe(no_mangle)]
         #[inline(never)]
@@ -521,10 +539,14 @@ macro_rules! tmr_entry {
     };
 }
 
-tmr_entry!(k_sb_tmr_256, sb_tmr_256, flush true);
-tmr_entry!(k_sb_tmr_512, sb_tmr_512, flush true);
-tmr_entry!(k_sbnf_tmr_256, sb_tmr_256, flush false);
-tmr_entry!(k_sbnf_tmr_512, sb_tmr_512, flush false);
+tmr_entry!(k_sb_tmr_256, sb_tmr_256, flush true, chunk CHUNK_U64);
+tmr_entry!(k_sb_tmr_512, sb_tmr_512, flush true, chunk CHUNK_U64);
+tmr_entry!(k_sbnf_tmr_256, sb_tmr_256, flush false, chunk CHUNK_U64);
+tmr_entry!(k_sbnf_tmr_512, sb_tmr_512, flush false, chunk CHUNK_U64);
+// The whole buffer as one chunk: every phase streams it, from DRAM when it's larger than the
+// caches (a large TMR chunk size).
+tmr_entry!(k_sbbig_tmr_256, sb_tmr_256, flush false, chunk whole);
+tmr_entry!(k_sbbig_tmr_512, sb_tmr_512, flush false, chunk whole);
 tmr_entry!(k_refresh_tmr_256, refresh_tmr_256, flush true);
 tmr_entry!(k_refresh_tmr_512, refresh_tmr_512, flush true);
 tmr_entry!(k_refreshnf_tmr_256, refresh_tmr_256, flush false);
