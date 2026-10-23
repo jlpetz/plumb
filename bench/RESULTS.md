@@ -493,3 +493,60 @@ range over three runs.
 
 Flushing 1 MiB of dirty lines takes 5.71-5.78 ns per line with CLFLUSHOPT and 186.8-187.4 ns
 with CLFLUSH: 33 times faster.
+
+## Transform-verify (2026-10-23)
+
+Same box (Xeon 6975P-C, 4 cores / 8 threads, 1 GiB pages, 2 GiB per thread), rustc 1.101
+nightly (2026-10-21), the box idle. Three runs: `--regime both --only xform,sbnf`; `--regime
+both --only amxread,amxfill,xformw,xformrw,xformr`; and two against four checksum chains,
+`--only xformr --threads 1,4`, the builds alternating twice. Every pass on clean memory reported
+no bad group.
+
+**Per phase, it streams at the box's rates except R.** W stores at fill speed. R at r = 0 reads
+at 77-82% of a plain read: the likely cause is that each pair's tile loads wait for the previous
+pair's multiplies to free its registers, so two data tiles are in flight against `amxread`'s
+four (not yet tested). The three phases' times add up to the whole pass (16.97 GiB/s predicted
+at 1T, 16.67 measured).
+
+```text
+DRAM, GiB/s           1T      4T     bytes per byte
+amxread  amx        15.33   54.01    1  (4 tile loads in flight)
+amxread  zmm_512    15.60   55.27    1
+amxfill  amx        12.43   41.24    1
+amxfill  zmm_512    12.61   41.62    1
+xformw   x16        12.67   41.26    1  (W: pattern tiles stored)
+xformrw  x16        27.07   85.57    2  (RW: load, multiply, store in place)
+xformr   x16_r0     12.06   44.46    1  (R alone)
+xformr   x16_r8      5.84   22.54    1
+```
+
+**Not comparable with `sbnf`.** The StuckBit port runs its three phases on each 1 MiB chunk
+(`CHUNK_U64`) in turn, so most of its traffic stays in L2: 43 GiB/s at one thread, against
+12-16 for any kernel here that streams the buffer. Transform-verify streams each phase over the
+whole buffer. A test-level comparison needs StuckBit with its flush (`sb`), or transform-verify
+run per chunk as TMR would.
+
+**The load setting.** A whole pass loses 22% at one thread from r = 0 to r = 8, 19% at four. In
+L2, R alone at r = 8 does 16.93 GiB/s: 6.3 ns a multiply (nine per KiB), 17 cycles at the 2.7
+GHz base clock against Intel's 16 per tile multiply. The matrix unit is at its full rate.
+
+**Two checksum chains are enough.** Four (each tile's repeats alternating between two checksum
+tiles, all eight tiles in use) gained nothing: R at r = 8 from L2 17.07 and 17.05 GiB/s with
+two, 16.33 and 16.28 with four; in DRAM at one thread, r = 0 11.98 and 11.96 against 11.40 and
+11.53, r = 8 tied (5.78-5.86). R at r = 0 from L2 wasn't stable between runs of the same binary
+(88.7 in the phase run, 59.3-59.7 in the A/B), so only its r = 8 figures (16.9-17.1) count.
+
+```text
+== sbnf | TMR StuckBit port, no flush (3 phases; 1 MiB chunks)
+   variant                 1T            2T            4T            6T            8T
+   tmr_512       43.26         85.26        154.98        112.17        139.65
+   pl_512        43.84 (101%)  85.42 (100%) 153.15 ( 99%) 111.86 (100%) 139.91 (100%)
+== xform | Transform-verify (W, RW, R) through AMX tiles (4 bytes per byte)
+   variant                 1T            2T            4T            6T            8T
+   x16_r0        16.67         31.75         56.15         43.57         53.53
+   x16_r1        15.58         29.92         53.10         43.36         53.05
+   x16_r4        13.83         27.26         48.45         41.54         50.70
+   x16_r8        12.98         24.97         45.49         39.30         48.68
+   x64_r0        17.68         33.64         58.99         45.13         54.87
+   L2, one thread, 256 KiB: x16 r0 75.36, r1 67.04, r4 57.41, r8 40.14, x64 r0 58.36
+```

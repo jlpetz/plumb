@@ -20,8 +20,8 @@ use std::collections::HashSet;
 use plumb_tiles::AmxInt8;
 
 use crate::xform::{
-    self, BUILTIN_CHECKSUM, BUILTIN_SEED, BadWord, GroupError, MAX_R, Matrix, PatternSet, Reread,
-    Signature, TILE_U64, Tile,
+    self, BUILTIN_CHECKSUM, BUILTIN_SEED, BadWord, GroupError, MAX_R, Matrix, PatternSet,
+    REREAD_RESCANS, RESCAN_LOGGED, Reread, Rescans, Signature, TILE_U64, Tile,
 };
 
 fn int8() -> Option<AmxInt8> {
@@ -224,7 +224,7 @@ fn clean_passes<const X: usize>(int8: AmxInt8, r: usize) {
     let set = PatternSet::<X>::new(int8, r, 0xC1EA);
     let mut b = buf::<X>(3);
     for pass in 0..2 * X + 1 {
-        let errors = xform::pass(int8, &set, &mut b, pass);
+        let errors = xform::pass(int8, &set, &mut b, pass, &mut Rescans::default());
         assert!(errors.is_empty(), "X={X} r={r} pass {pass}: {errors:?}");
         // Each tile holds its rotated pattern's transform: the rotation and the transform agree
         // with each other, not just with the checksum.
@@ -338,7 +338,9 @@ fn sweep<const X: usize>(
         for (g, group) in b.chunks_mut(gw).enumerate() {
             after(group, start + g, g);
         }
-        let errors = xform::verify(int8, set, &b, pass);
+        let mut rescans = Rescans::default();
+        let errors = xform::verify(int8, set, &b, pass, &mut rescans);
+        assert_eq!(rescans.alarms, errors.len() as u64);
         let mut by_group: Vec<Option<&GroupError>> = vec![None; n];
         for e in &errors {
             assert!(
@@ -355,7 +357,8 @@ fn sweep<const X: usize>(
 
 /// Every one of the 131,072 single-bit errors a group's stored result can have (each tile, each
 /// bit), at r = 3 (every product added four times): caught, and tier 2 names the tile, the word,
-/// the byte and bit, rereads it, and the tiles still see it.
+/// the byte and bit, rereads it (in each batch's first [`REREAD_RESCANS`] rescans, its budget),
+/// and the tiles still see it.
 #[test]
 fn single_bit_in_the_stored_result_is_caught_and_located() {
     let Some(int8) = int8() else { return };
@@ -382,6 +385,7 @@ fn single_bit_in_the_stored_result_is_caught_and_located() {
             let expected = set.expected(pattern).0[bit / 64];
             let actual = expected ^ (1 << (bit % 64));
             assert_eq!((te.tile, te.pattern), (t, pattern), "bit {bit}");
+            assert_eq!((e.bad_words, te.bad_words), (1, 1), "tile {t} bit {bit}");
             assert_eq!(
                 te.words,
                 [BadWord {
@@ -406,7 +410,12 @@ fn single_bit_in_the_stored_result_is_caught_and_located() {
                 after_flush: actual,
                 via_tiles: actual,
             };
-            assert_eq!(e.rereads, [reread], "tile {t} bit {bit}");
+            let rereads: &[Reread] = if g < REREAD_RESCANS as usize {
+                &[reread]
+            } else {
+                &[]
+            };
+            assert_eq!(e.rereads, rereads, "tile {t} bit {bit} group {g}");
             assert!(e.tile_recheck, "tile {t} bit {bit}: recheck");
         },
     );
@@ -647,7 +656,7 @@ fn verify_reports_each_bad_group_and_reads_on() {
     for g in [0, 3, 6] {
         b[g * gw + 100] ^= 1 << 40;
     }
-    let errors = xform::verify(int8, &set, &b, 1);
+    let errors = xform::verify(int8, &set, &b, 1, &mut Rescans::default());
     let groups: Vec<usize> = errors.iter().map(|e| e.group).collect();
     assert_eq!(groups, [0, 3, 6]);
     assert!(errors.iter().all(GroupError::reproduced));
@@ -661,10 +670,53 @@ fn a_check_the_rescan_cant_reproduce_is_reported_not_reproduced() {
     let Some(int8) = int8() else { return };
     let set = PatternSet::<16>::new(int8, 2, 0x7E57);
     let mut b = buf::<16>(2);
-    assert!(xform::pass(int8, &set, &mut b, 4).is_empty());
-    let e = xform::rescan_group(int8, &set, &b, 1, 4);
-    assert_eq!(e.group, 1);
+    assert!(xform::pass(int8, &set, &mut b, 4, &mut Rescans::default()).is_empty());
+    let mut rescans = Rescans::default();
+    let e = xform::rescan_group(int8, &set, &b, 1, 4, &mut rescans);
+    assert_eq!((e.group, e.bad_words), (1, 0));
     assert!(!e.reproduced());
     assert!(e.tiles.is_empty() && e.rereads.is_empty());
     assert!(!e.tile_recheck, "the tile path agrees on a clean group");
+    assert_eq!((rescans.alarms, rescans.not_reproduced), (1, 1));
+}
+
+/// Tier 2 is capped as TMR's is: a group's report counts every bad word and keeps the first
+/// [`RESCAN_LOGGED`], and only a test's first [`REREAD_RESCANS`] rescans reread, so a run full
+/// of errors doesn't slow to the rereads' pace.
+#[test]
+fn tier_2_is_capped_as_tmrs_is() {
+    let Some(int8) = int8() else { return };
+    let set = PatternSet::<16>::new(int8, 0, 0xCA9);
+    let mut b = buf::<16>(20);
+    xform::write(int8, &set, &mut b, 0);
+    xform::transform(int8, &set, &mut b);
+    for w in &mut b {
+        *w = !*w;
+    }
+    let mut rescans = Rescans::default();
+    let errors = xform::verify(int8, &set, &b, 0, &mut rescans);
+    assert_eq!(errors.len(), 20);
+    for e in &errors {
+        assert_eq!(e.bad_words, 16 * TILE_U64 as u64, "group {}", e.group);
+        assert_eq!(
+            e.tiles.len(),
+            16,
+            "group {}: every bad tile listed",
+            e.group
+        );
+        assert!(e.tiles.iter().all(|t| t.bad_words == TILE_U64));
+        let kept: usize = e.tiles.iter().map(|t| t.words.len()).sum();
+        assert_eq!(kept, RESCAN_LOGGED, "group {}", e.group);
+        let rereads = if e.group < REREAD_RESCANS as usize {
+            4
+        } else {
+            0
+        };
+        assert_eq!(e.rereads.len(), rereads, "group {}", e.group);
+    }
+    assert_eq!((rescans.alarms, rescans.not_reproduced), (20, 0));
+    // The test's budget is spent: a second R pass in it doesn't reread.
+    let again = xform::verify(int8, &set, &b, 0, &mut rescans);
+    assert!(again.iter().all(|e| e.rereads.is_empty()));
+    assert_eq!(rescans.alarms, 40);
 }

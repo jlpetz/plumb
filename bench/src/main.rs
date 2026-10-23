@@ -46,7 +46,7 @@ mod tests_xform;
 mod tiles;
 mod tmr;
 mod tmrport;
-#[allow(dead_code)] // wired into a bench group next (design doc item 3); the tests use it now
+#[allow(dead_code)] // the `xform` group runs `pass`; the tests read the reports' fields
 mod xform;
 
 use common::*;
@@ -115,8 +115,8 @@ fn usage() -> ! {
         "usage: plumb-bench [--quick] [--regime l2|dram|both] [--only ids] [--threads 1,2,4,6,8]\n\
          \x20      [--per-thread-mib 2048] [--pages huge|large|small] [--samples 5] [--cpu 2]\n\
          \x20      [--csv results.csv] [--load sse2|avx2|avx512|amx] [--load-duty on_us:off_us]\n\
-         group ids: fill verify4 posw posv lcgw flush sbnf amxmirror; DRAM only: ntw wflush pfv copy\n\
-         \x20 fillflush sb refresh refreshx refreshnf simplent"
+         group ids: fill verify4 posw posv lcgw flush sbnf amxmirror xform xformw xformrw xformr; DRAM only: ntw\n\
+         \x20 wflush pfv copy fillflush sb refresh refreshx refreshnf simplent"
     );
     std::process::exit(2)
 }
@@ -224,6 +224,22 @@ fn w(f: unsafe fn(*mut u64, usize)) -> impl Fn(&mut [u64]) -> u64 + Send + Sync 
 fn r(f: unsafe fn(*const u64, usize) -> u64) -> impl Fn(&mut [u64]) -> u64 + Send + Sync {
     // SAFETY: as above.
     move |b: &mut [u64]| unsafe { f(b.as_ptr(), b.len()) }
+}
+/// A transform-verify pass (W, RW and R) with `set`, returning the bad groups (0 when clean).
+fn xform_run<const X: usize>(
+    int8: plumb_tiles::AmxInt8,
+    set: xform::PatternSet<X>,
+) -> impl Fn(&mut [u64]) -> u64 + Send + Sync {
+    move |b: &mut [u64]| xform::pass(int8, &set, b, 0, &mut xform::Rescans::default()).len() as u64
+}
+/// Transform-verify's R alone with `set`, on a buffer W and RW prepared.
+fn xform_verify<const X: usize>(
+    int8: plumb_tiles::AmxInt8,
+    set: xform::PatternSet<X>,
+) -> impl Fn(&mut [u64]) -> u64 + Send + Sync {
+    move |b: &mut [u64]| {
+        xform::verify(int8, &set, b, 0, &mut xform::Rescans::default()).len() as u64
+    }
 }
 fn split(b: &mut [u64]) -> (&mut [u64], &[u64]) {
     let half = b.len() / 2;
@@ -820,6 +836,76 @@ fn groups<'a>(t: &'a Toks, regime: Regime) -> Vec<Group<'a>> {
         t,
         6.0,
     ));
+    // Transform-verify (xform.rs, TODO 6) under the AMX load it makes itself: the built-in set
+    // (X = 16) at load settings r = 0, 1, 4 and 8, and X = 64 at r = 0. Each pass writes (W),
+    // reads and writes (RW) and reads (R) the buffer: 4 bytes of traffic per byte, against
+    // StuckBit's 6 (`sbnf`). Skipped if the matrix unit fails the startup check.
+    if let Some(int8) = t.amx.and_then(plumb_tiles::Amx::int8) {
+        if xform::self_test(int8) {
+            let x16 = |r| xform::PatternSet::<16>::builtin(int8, r, 0).expect("self-tested");
+            let x64 = xform::PatternSet::<64>::new(int8, 0, xform::BUILTIN_SEED);
+            gs.push(Group {
+                id: "xform",
+                title: "Transform-verify (W, RW, R) through AMX tiles, X = 16 at r = 0/1/4/8 and X = 64",
+                setup: None,
+                prime: if dram { Prime::Flush } else { Prime::None },
+                expect_zero: true,
+                bytes_mult: 4.0,
+                variants: vec![
+                    v!("x16_r0", xform_run(int8, x16(0))),
+                    v!("x16_r1", xform_run(int8, x16(1))),
+                    v!("x16_r4", xform_run(int8, x16(4))),
+                    v!("x16_r8", xform_run(int8, x16(8))),
+                    v!("x64_r0", xform_run(int8, x64)),
+                ],
+            });
+            // Each phase alone, to see which sets the pace: W (1 byte of traffic per byte), RW
+            // (2) and R (1, at r = 0 and 8, on a buffer W and RW prepared once).
+            let (w_set, rw_set, prep) = (x16(0), x16(0), x16(0));
+            gs.push(Group {
+                id: "xformw",
+                title: "Transform-verify's W alone: pattern tiles stored (X = 16)",
+                setup: None,
+                prime: if dram { Prime::Flush } else { Prime::None },
+                expect_zero: false,
+                bytes_mult: 1.0,
+                variants: vec![v!("x16", move |b| {
+                    xform::write(int8, &w_set, b, 0);
+                    0
+                })],
+            });
+            gs.push(Group {
+                id: "xformrw",
+                title: "Transform-verify's RW alone: each tile multiplied in place (X = 16)",
+                setup: None,
+                prime: if dram { Prime::Flush } else { Prime::None },
+                expect_zero: false,
+                bytes_mult: 2.0,
+                variants: vec![v!("x16", move |b| {
+                    xform::transform(int8, &rw_set, b);
+                    0
+                })],
+            });
+            gs.push(Group {
+                id: "xformr",
+                title: "Transform-verify's R alone, X = 16 at r = 0 and 8",
+                setup: Some(Box::new(move |b: &mut [u64]| {
+                    xform::write(int8, &prep, b, 0);
+                    xform::transform(int8, &prep, b);
+                    0
+                })),
+                prime: if dram { Prime::Flush } else { Prime::None },
+                expect_zero: true,
+                bytes_mult: 1.0,
+                variants: vec![
+                    v!("x16_r0", xform_verify(int8, x16(0))),
+                    v!("x16_r8", xform_verify(int8, x16(8))),
+                ],
+            });
+        } else {
+            eprintln!("xform: the matrix unit failed its startup check; group skipped");
+        }
+    }
     gs
 }
 

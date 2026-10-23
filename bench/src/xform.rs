@@ -54,6 +54,12 @@ include!("xform_builtin.rs");
 const REREAD_WORDS: usize = 4;
 const REREADS: u32 = 4;
 
+/// Bad words a group's report keeps (the rescan counts them all), and the rescans of a test that
+/// reread, so a run full of errors doesn't slow to the rereads' pace: TMR's `RESCAN_LOGGED` and
+/// `REREAD_RESCANS`.
+pub const RESCAN_LOGGED: usize = 10;
+pub const REREAD_RESCANS: u32 = 16;
+
 /// One tile's worth of data: a pattern, or memory holding `T(P)`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Tile(pub [u64; TILE_U64]);
@@ -313,8 +319,12 @@ pub struct TileError {
     pub tile: usize,
     /// The pattern it should hold.
     pub pattern: usize,
-    /// Every differing word, by volatile loads.
+    /// How many of its words differ.
+    pub bad_words: usize,
+    /// Its first differing words, by volatile loads, while the group's report has room
+    /// ([`RESCAN_LOGGED`] words in all).
     pub words: Vec<BadWord>,
+    /// The shape of all its differences.
     pub signature: Signature,
 }
 
@@ -337,9 +347,12 @@ pub struct Reread {
 #[derive(Debug)]
 pub struct GroupError {
     pub group: usize,
+    /// Every differing word the rescan found.
+    pub bad_words: u64,
     /// The bad tiles. Empty: the rescan found every word right, the check is not reproduced.
     pub tiles: Vec<TileError>,
-    /// The first [`REREAD_WORDS`] bad words, reread.
+    /// The first [`REREAD_WORDS`] bad words, reread; none once the test's first
+    /// [`REREAD_RESCANS`] rescans have reread.
     pub rereads: Vec<Reread>,
     /// Whether the checksum still disagrees when it's recomputed through the tiles after the
     /// rescan. With nothing reproduced, true means the tile path sees what word loads don't: a
@@ -351,6 +364,18 @@ impl GroupError {
     pub fn reproduced(&self) -> bool {
         !self.tiles.is_empty()
     }
+}
+
+/// One test's tier-2 counts on one thread, as TMR's `RescanCounts`: a test starts with
+/// `Rescans::default()` and passes it to each [`verify`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rescans {
+    /// Groups whose checksum disagreed.
+    pub alarms: u64,
+    /// Of those, the ones whose rescan found every word right.
+    pub not_reproduced: u64,
+    /// Rescans that have reread, against [`REREAD_RESCANS`].
+    rereading: u32,
 }
 
 /// The shape of `words` (one tile's differences, in word order) against the transform `k`.
@@ -423,24 +448,25 @@ pub fn transform<const X: usize>(int8: AmxInt8, set: &PatternSet<X>, buf: &mut [
 
 /// **R** and tier 2: checks every group's checksum against what [`write`] and [`transform`] with
 /// the same `pass` leave there, and rescans each group that disagrees as soon as it's found,
-/// before the pass reads on. Returns one [`GroupError`] per such group, in buffer order; empty
-/// when the buffer is clean.
+/// before the pass reads on, within the test's budget `rescans`. Returns one [`GroupError`] per
+/// such group, in buffer order; empty when the buffer is clean.
 pub fn verify<const X: usize>(
     int8: AmxInt8,
     set: &PatternSet<X>,
     buf: &[u64],
     pass: usize,
+    rescans: &mut Rescans,
 ) -> Vec<GroupError> {
     check_groups::<X>(buf);
     let mut errors = Vec::new();
     let mut sums = [[0; TILE_U64]; 2];
     let groups = buf.as_chunks::<TILE_U64>().0.as_chunks::<X>().0;
     let mut from = 0;
-    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `verify_tiles` and `rescan`
+    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `verify_tiles` and `tier2`
     // enable.
     while let Some(g) = unsafe { verify_tiles::<X>(int8, set, buf, pass, from, &mut sums) } {
         let off = rotation::<X>(set.layout, g, pass);
-        errors.push(unsafe { rescan::<X>(int8, set, &groups[g], g, off, &mut sums) });
+        errors.push(unsafe { tier2::<X>(int8, set, &groups[g], g, off, &mut sums, rescans) });
         from = g + 1;
     }
     errors
@@ -452,10 +478,11 @@ pub fn pass<const X: usize>(
     set: &PatternSet<X>,
     buf: &mut [u64],
     pass: usize,
+    rescans: &mut Rescans,
 ) -> Vec<GroupError> {
     write(int8, set, buf, pass);
     transform(int8, set, buf);
-    verify(int8, set, buf, pass)
+    verify(int8, set, buf, pass, rescans)
 }
 
 // The kernels. Each runs its phase over the buffer in one session, from a function compiled
@@ -571,28 +598,49 @@ fn group_sums<const X: usize>(
     t.store_u64::<T1>(&mut sums[1], ROW_BYTES);
 }
 
-/// Two words of u32 lanes added lane by lane, each lane wrapping on its own (as the multiply's
+/// A tile's 256 u32 entries (an accumulator's layout).
+#[inline(always)]
+fn lanes32(t: &[u64; TILE_U64]) -> &[u32; 2 * TILE_U64] {
+    // SAFETY: the same 1 KiB, and u32's alignment divides u64's.
+    unsafe { &*core::ptr::from_ref(t).cast::<[u32; 2 * TILE_U64]>() }
+}
+
+/// Entry `n` of the group checksum: the chains' entry `n` added up, wrapping (as the multiply's
 /// accumulator does).
 #[inline(always)]
-fn add_lanes(a: u64, b: u64) -> u64 {
-    let lo = (a as u32).wrapping_add(b as u32);
-    let hi = ((a >> 32) as u32).wrapping_add((b >> 32) as u32);
-    u64::from(lo) | (u64::from(hi) << 32)
+fn total(sums: &[[u64; TILE_U64]; 2], n: usize) -> u32 {
+    sums.iter().fold(0, |s, c| s.wrapping_add(lanes32(c)[n]))
 }
 
-/// Whether the two chains add up to `expected`.
+/// Whether the chains add up to `expected`.
 #[inline(always)]
 fn sums_match(sums: &[[u64; TILE_U64]; 2], expected: &Tile) -> bool {
-    let diff = sums[0]
-        .iter()
-        .zip(&sums[1])
-        .zip(&expected.0)
-        .fold(0, |acc, ((a, b), e)| acc | (add_lanes(*a, *b) ^ e));
-    diff == 0
+    let e = lanes32(&expected.0);
+    (0..2 * TILE_U64).fold(0, |acc, n| acc | (total(sums, n) ^ e[n])) == 0
 }
 
-/// Tier 2 for group `g`: the rescan against `T(P_i)` with volatile loads, then in one session
-/// the rereads and the checksum again through the tiles. `sums` is scratch.
+/// Tier 2 for group `g`, counted in the test's `rescans`: as TMR's, only its first
+/// [`REREAD_RESCANS`] rescans that find a bad word reread.
+#[target_feature(enable = "amx-tile,amx-int8")]
+unsafe fn tier2<const X: usize>(
+    int8: AmxInt8,
+    set: &PatternSet<X>,
+    group: &[[u64; TILE_U64]; X],
+    g: usize,
+    off: usize,
+    sums: &mut [[u64; TILE_U64]; 2],
+    rescans: &mut Rescans,
+) -> GroupError {
+    let may_reread = rescans.rereading < REREAD_RESCANS;
+    let e = rescan::<X>(int8, set, group, g, off, may_reread, sums);
+    rescans.alarms += 1;
+    rescans.rereading += u32::from(may_reread && e.reproduced());
+    rescans.not_reproduced += u64::from(!e.reproduced());
+    e
+}
+
+/// The rescan against `T(P_i)` with volatile loads, then in one session the rereads (if
+/// `may_reread`) and the checksum again through the tiles. `sums` is scratch.
 #[cold]
 #[inline(never)]
 #[target_feature(enable = "amx-tile,amx-int8")]
@@ -602,12 +650,13 @@ unsafe fn rescan<const X: usize>(
     group: &[[u64; TILE_U64]; X],
     g: usize,
     off: usize,
+    may_reread: bool,
     sums: &mut [[u64; TILE_U64]; 2],
 ) -> GroupError {
-    let mut tiles = Vec::new();
+    let (mut tiles, mut bad_words, mut logged) = (Vec::new(), 0, 0);
     for (i, tile) in group.iter().enumerate() {
         let pattern = (i + off) & (X - 1);
-        let words: Vec<BadWord> = set.expected_t[pattern]
+        let mut words: Vec<BadWord> = set.expected_t[pattern]
             .0
             .iter()
             .zip(tile)
@@ -622,21 +671,31 @@ unsafe fn rescan<const X: usize>(
             })
             .collect();
         if !words.is_empty() {
+            let (count, signature) = (words.len(), signature(&words, &set.transform));
+            words.truncate(RESCAN_LOGGED - logged);
+            logged += words.len();
+            bad_words += count as u64;
             tiles.push(TileError {
                 tile: i,
                 pattern,
-                signature: signature(&words, &set.transform),
+                bad_words: count,
                 words,
+                signature,
             });
         }
     }
     let (rereads, tile_recheck) = int8.with_tiles(|t| {
-        let rereads = reread(t, group, &tiles, &mut sums[0]);
+        let rereads = if may_reread {
+            reread(t, group, &tiles, &mut sums[0])
+        } else {
+            Vec::new()
+        };
         group_sums::<X>(t, int8, &set.keys, group, off, set.r, sums);
         (rereads, !sums_match(sums, &set.expected_sum))
     });
     GroupError {
         group: g,
+        bad_words,
         tiles,
         rereads,
         tile_recheck,
@@ -708,7 +767,9 @@ unsafe fn group_checksum<const X: usize>(
         .try_into()
         .expect("one group");
     int8.with_tiles(|t| group_sums::<X>(t, int8, keys, group, 0, r, &mut sums));
-    Tile(std::array::from_fn(|w| add_lanes(sums[0][w], sums[1][w])))
+    Tile(std::array::from_fn(|w| {
+        u64::from(total(&sums, 2 * w)) | (u64::from(total(&sums, 2 * w + 1)) << 32)
+    }))
 }
 
 /// Test-only: tier 2 on group `g` of `buf`, as if its checksum had disagreed.
@@ -719,13 +780,14 @@ pub fn rescan_group<const X: usize>(
     buf: &[u64],
     g: usize,
     pass: usize,
+    rescans: &mut Rescans,
 ) -> GroupError {
     check_groups::<X>(buf);
     let mut sums = [[0; TILE_U64]; 2];
     let group = &buf.as_chunks::<TILE_U64>().0.as_chunks::<X>().0[g];
     let off = rotation::<X>(set.layout, g, pass);
-    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `rescan` enables.
-    unsafe { rescan::<X>(int8, set, group, g, off, &mut sums) }
+    // SAFETY: `int8` proves AMX-TILE and AMX-INT8, the features `tier2` enables.
+    unsafe { tier2::<X>(int8, set, group, g, off, &mut sums, rescans) }
 }
 
 /// The set's internals, for `tests_xform.rs`'s independent computation.
