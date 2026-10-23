@@ -85,12 +85,15 @@ one running checksum (owner's decision 2026-10-22: any r up to 65534, not one ch
 multiply, which capped r at 5), on two independent chains, the two-bit guarantee on the 16-byte
 rows it really needs, a rotation keyed per cycle by the run's seed, the built-in set's checksum
 stored and checked at startup (`self_test`), and tier 2 with TMR's rescan and rereads, a reread
-through the tiles and "not reproduced". 14 tests, among them exhaustive single-bit sweeps of the
-stored result and of the pattern before the transform; asm gate 150/150 with `k_xform_*`
-(`expect/xform.json`).
-**Next**: time it against StuckBit's zmm write/verify at 1-8 threads, r = 0, 1, 4, 8 (design doc
-item 3, needs the box), with the number of checksum chains as a variable; decide whether to wire
-it into a bench `--only` group; a VNNI/AVX-512 version for AMD is still open.
+through the tiles and "not reproduced", its rereads capped as TMR's. 15 tests, among them
+exhaustive single-bit sweeps of the stored result and of the pattern before the transform; asm
+gate 150/150 with `k_xform_*` (`expect/xform.json`). AMX and ACE only, no VNNI version (owner,
+2026-10-23). Timed 2026-10-23 (bench `xform`, `xformw`/`xformrw`/`xformr`, RESULTS.md): W
+streams at fill speed, R at r = 0 at 77-82% of a plain read; r = 8 costs 19-22% of a pass, the
+matrix unit at full rate; four checksum chains gained nothing over two. The StuckBit port isn't
+a like-for-like baseline: its 1 MiB chunks stay in L2.
+**Next**: keep four data tiles in flight in R (and RW), as `amxread` does, and A/B it; compare
+with StuckBit's flushed `sb`, or run transform-verify per chunk as TMR would.
 
 ### 7. ACE backend
 **Status**: Waiting: no hardware; LLVM PRs open (llvm-project#208408/#208706), nothing in rustc.
@@ -138,3 +141,12 @@ TODO 97/99's kernels need that fearless_simd and plumb don't express, and confir
 above; re-port one current kernel and check it with `hot_loop_spills.py` as well as
 `asm_check.py`, which has no gpr round-trip, indexed or constant-reload columns; A/B it with
 `bench_ab.py` on Intel and AMD. Item 8's pilot plan follows from the result.
+
+### 13. Transform-verify: the matrix unit is busy in R only
+**Status**: Open, to think on (the owner, 2026-10-23). The load setting r adds multiplies to R
+alone: W does none and RW one per tile, so under load the matrix unit runs in bursts, one phase
+in three. The design's purpose is memory that holds up under a busy CPU, which may mean load in
+every phase.
+**Next**: measure each phase's share of a pass, then choose: r in W and RW too (into a spare
+tile, since RW's result is the stored data), the bench's `--load amx` on a neighbouring core, or
+bursts as they are.
