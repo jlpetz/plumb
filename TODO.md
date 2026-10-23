@@ -78,15 +78,19 @@ Timed 2026-10-21: 86-89% of TMR's swap in DRAM, 97% from L2, so no AMX MirrorMov
 Owner's idea the same day, a memory test under tile-multiply load (write a pattern, transform it
 in place with `TDPBUUD`, verify against the precomputed result):
 `fearlessD/design/amx-transform-verify.md`. 2026-10-21/22: prototyped as `bench/src/xform.rs`
-(not wired into a bench group): `PatternSet` (x patterns, 1+r checksum matrices per pattern,
-every matrix byte odd and every row distinct), `fill`/`verify` as separate steps, tier-2 exact
-locating (and, for a single bit flipped before the transform, the byte/bit/sign). 9 tests pass:
-expected-value self-check, a clean pass, the rotation/transform agreement, single-bit detection
-both in the stored result and before the transform (with the classifier verified against the
-known flip), an exhaustive two-bit sweep (496 combinations, all caught), and the load dial's
-extra checks adding no false positives while each independently catching corruption.
-**Next**: time it against StuckBit's zmm write/verify (design doc item 3, needs the box); decide
-whether to wire it into a bench `--only` group; a VNNI/AVX-512 version for AMD is still open.
+(not wired into a bench group). Reworked 2026-10-22 after a review against the design and TMR's
+Rule 6: X a const generic (masks, not a div per tile), one session per phase, W as tile stores,
+RW keeping its matrix in a tile, R loading each tile once and adding its product 1+r times into
+one running checksum (owner's decision 2026-10-22: any r up to 65534, not one checksum per extra
+multiply, which capped r at 5), on two independent chains, the two-bit guarantee on the 16-byte
+rows it really needs, a rotation keyed per cycle by the run's seed, the built-in set's checksum
+stored and checked at startup (`self_test`), and tier 2 with TMR's rescan and rereads, a reread
+through the tiles and "not reproduced". 14 tests, among them exhaustive single-bit sweeps of the
+stored result and of the pattern before the transform; asm gate 150/150 with `k_xform_*`
+(`expect/xform.json`).
+**Next**: time it against StuckBit's zmm write/verify at 1-8 threads, r = 0, 1, 4, 8 (design doc
+item 3, needs the box), with the number of checksum chains as a variable; decide whether to wire
+it into a bench `--only` group; a VNNI/AVX-512 version for AMD is still open.
 
 ### 7. ACE backend
 **Status**: Waiting: no hardware; LLVM PRs open (llvm-project#208408/#208706), nothing in rustc.
@@ -94,7 +98,7 @@ whether to wire it into a bench `--only` group; a VNNI/AVX-512 version for AMD i
 ACE-shaped meanwhile.
 
 ### 8. TMR integration and pilot
-**Status**: After items 1-2.
+**Status**: After items 1-2 and 12 (the readiness re-check after TMR's TODO 99).
 **Next**: a `src/simd/` module in TMR-APP; pilot StuckBit behind `asm_check.py` and the
 equivalence tests, then Refresh, SimpleTest, SimpleNT, MirrorMove. Updating TMR's settled
 `macro_rules!` decision is part of the pilot's close-out.
@@ -119,3 +123,18 @@ offsets. So it's code placement or run order, not a source change TMR could make
 plumb advantage. Without the flush the styles are at parity (`refreshnf`). README and RESULTS
 corrected.
 **Next**: none; no TMR TODO.
+
+### 12. Readiness re-check: can plumb replace TMR-APP's loops after TMR's TODO 99?
+**Status**: Open, raised 2026-10-22 (the owner). TMR's TODO 99 rewrote its hot loops to Rule 6
+(6.1-6.19, `TMR-APP/doc/simd_codegen_rules.md`) and added `tools/hot_loop_spills.py` and
+`tools/bench_ab.py`. That leaves most of plumb's TMR evidence stale. The ±2% parity was measured
+against kernels from before TODO 99, four of the six macros it copied are gone, and the
+StuckBit, Refresh and SimpleNT ports here are pre-99 copies. On paper, fearless_simd 1.0 lacks a
+vector OR-reduce and two-input permutes, and on AVX2 its 64-bit vector multiply runs as four
+scalar multiplies. TODO 99 found that a change of loop shape costs 3% to 2x. So the likely answer
+is "as fast only in today's loop shapes, in a different vocabulary".
+**Next**: after TMR's TODO 100 baseline (TMR's TODO 84 holds the owner's terms): list what
+TODO 97/99's kernels need that fearless_simd and plumb don't express, and confirm the three gaps
+above; re-port one current kernel and check it with `hot_loop_spills.py` as well as
+`asm_check.py`, which has no gpr round-trip, indexed or constant-reload columns; A/B it with
+`bench_ab.py` on Intel and AMD. Item 8's pilot plan follows from the result.
