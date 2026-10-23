@@ -90,10 +90,13 @@ exhaustive single-bit sweeps of the stored result and of the pattern before the 
 gate 150/150 with `k_xform_*` (`expect/xform.json`). AMX and ACE only, no VNNI version (owner,
 2026-10-23). Timed 2026-10-23 (bench `xform`, `xformw`/`xformrw`/`xformr`, RESULTS.md): W
 streams at fill speed, R at r = 0 at 77-82% of a plain read; r = 8 costs 19-22% of a pass, the
-matrix unit at full rate; four checksum chains gained nothing over two. The StuckBit port isn't
-a like-for-like baseline: its 1 MiB chunks stay in L2.
-**Next**: keep four data tiles in flight in R (and RW), as `amxread` does, and A/B it; compare
-with StuckBit's flushed `sb`, or run transform-verify per chunk as TMR would.
+matrix unit at full rate; four checksum chains gained nothing over two. Reading ahead (four
+data tiles in flight) is kept in RW (+5-7%) and in R from r = 6 (+6-10%; it loses below). At
+matched chunk sizes, in DRAM it moves 9-24% more traffic than the StuckBit port with the whole
+buffer as its chunk (`sbbig`) and 9-57% more than its flushed `sb`; in 1 MiB chunks, 69-74% of
+`sbnf` (four passes per chunk to StuckBit's six).
+**Next**: decide whether it becomes a TMR TODO (the design's last step) and how TMR's chunk-size
+and flush settings apply to it.
 
 ### 7. ACE backend
 **Status**: Waiting: no hardware; LLVM PRs open (llvm-project#208408/#208706), nothing in rustc.
